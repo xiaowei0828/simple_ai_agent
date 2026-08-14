@@ -1,0 +1,40 @@
+{
+  "name": "simple-code-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A small, educational code agent built on the OpenAI Responses API.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "simple-code-agent": "dist/cli/main.js",
+    "simple-code-agent-trace": "dist/cli/trace-viewer.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/main.ts",
+    "start": "node dist/cli/main.js",
+    "trace:view": "tsx src/cli/trace-viewer.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "openai": "^7.4.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
