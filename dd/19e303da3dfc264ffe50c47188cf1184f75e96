@@ -1,0 +1,25 @@
+src/tools/load-skill.ts
+  s_6b27153cb2f90a::t_5ee4efef420c3d 16,21,30,37,39,49,61,81
+tests/tools-and-context.test.ts
+  s_6b27153cb2f90a::t_014a829732af4d 331,346
+README.md
+  s_6b27153cb2f90a::t_7bc8f8a9850182 245
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "dd19e303da3dfc264ffe50c47188cf1184f75e96",
+  "prompts": {},
+  "sessions": {
+    "s_6b27153cb2f90a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ffe22-0dff-7e33-96a8-b73815c49fdc",
+        "model": "unknown"
+      },
+      "human_author": "weirongbin <weirongbin@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
