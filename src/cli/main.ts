@@ -7,6 +7,10 @@ import { createInterface } from "node:readline/promises";
 import { runInteractiveSession } from "./interactive-session.js";
 import { openInDefaultBrowser } from "./open-default-browser.js";
 import {
+  CommandAllowlistStore,
+  resolveCommandAllowlistPath,
+} from "../config/command-allowlist.js";
+import {
   loadAppConfig,
   resolveAppConfigPath,
   resolveRuntimeModelConfig,
@@ -24,6 +28,8 @@ import { findLatestTraceFile } from "../trace-viewer/latest-trace.js";
 import {
   AutoApproveWorkspaceFileOperationsPolicy,
   CallbackApprovalPolicy,
+  extractSimpleCommandPrograms,
+  ProgramAllowlistApprovalPolicy,
 } from "../policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../tools/index.js";
 
@@ -58,6 +64,7 @@ Environment:
 
 Configuration:
   .config/config.json            API key, base URL, default model, and available models
+  .config/command-allowlist.json Programs persistently approved for direct run_command calls
 
 Examples:
   npm run dev -- --workspace .
@@ -161,6 +168,8 @@ async function main(): Promise<void> {
 
   const workspaceRoot = await realpath(path.resolve(options.workspace));
   if (!(await stat(workspaceRoot)).isDirectory()) throw new Error("--workspace must point to a directory.");
+  const commandAllowlistPath = resolveCommandAllowlistPath();
+  const commandAllowlist = await CommandAllowlistStore.load(commandAllowlistPath);
 
   const environmentRoots = (process.env.CODE_AGENT_SKILL_ROOTS ?? "")
     .split(path.delimiter)
@@ -201,12 +210,37 @@ async function main(): Promise<void> {
   const interactiveApprovalPolicy = new CallbackApprovalPolicy(async (request: ApprovalRequest) => {
     if (options.autoApprove) return true;
     const preview = JSON.stringify(request.arguments, null, 2).slice(0, 2_000);
+    const command = request.toolName === "run_command"
+      && typeof request.arguments === "object"
+      && request.arguments !== null
+      && "command" in request.arguments
+      && typeof request.arguments.command === "string"
+      ? request.arguments.command
+      : undefined;
+    const programs = command ? extractSimpleCommandPrograms(command) : undefined;
+    const programLabel = programs?.join("', '");
+    const choices = programs
+      ? `[y] allow once  [p] always allow program(s) '${programLabel}'  [N] deny`
+      : "[y/N]";
     const answer = await readline!.question(
-      `\nApprove ${request.risk} tool '${request.toolName}'?\n${preview}\n[y/N] `,
+      `\nApprove ${request.risk} tool '${request.toolName}'?\n${preview}\n${choices} `,
     );
-    return /^(?:y|yes)$/i.test(answer.trim());
+    const decision = answer.trim().toLowerCase();
+    if (decision === "y" || decision === "yes") return true;
+    if (programs && (decision === "p" || decision === "program")) {
+      const added = await commandAllowlist.addPrograms(programs);
+      process.stderr.write(
+        added.length > 0
+          ? `agent: added program(s) '${added.join("', '")}' to ${commandAllowlistPath}\n`
+          : "agent: all programs are already allowlisted\n",
+      );
+      return true;
+    }
+    return false;
   });
-  const approvalPolicy = new AutoApproveWorkspaceFileOperationsPolicy(interactiveApprovalPolicy);
+  const approvalPolicy = new AutoApproveWorkspaceFileOperationsPolicy(
+    new ProgramAllowlistApprovalPolicy(commandAllowlist, interactiveApprovalPolicy),
+  );
 
   try {
     const runner = new AgentRunner({

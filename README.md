@@ -6,7 +6,7 @@
 
 - Responses API 的多轮工具调用循环，并通过 `previous_response_id` 延续交互式会话
 - 七个基础工具：`list_directory`、`read_file`、`search_code`、`write_file`、`replace_in_file`、`delete_file`、`run_command`；发现 Skill 时额外注册 `load_skill`
-- 工作区内的新建、修改、删除文件由宿主策略自动批准；每次 `run_command` 都需人机审批，`--yes` 可用于受信环境
+- 工作区内的新建、修改、删除文件由宿主策略自动批准；`run_command` 支持逐次审批、持久化程序白名单和受信环境下的 `--yes`
 - 工作区路径限制、符号链接逃逸检查、常见密钥文件拦截
 - 测试子进程会移除名称类似 token、secret、password、API key 的环境变量
 - `AGENTS.md` / `AGENTS.override.md` 项目指令加载
@@ -35,7 +35,7 @@ flowchart LR
 
 1. 把任务、系统指令和工具 JSON Schema 发给模型。
 2. 如果模型返回 `function_call`，解析并用 Zod 校验参数。
-3. 读操作直接执行；写操作和进程执行先交给 `ApprovalPolicy`。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
+3. 读操作直接执行；写操作和进程执行先交给 `ApprovalPolicy`。工作区文件操作由宿主策略自动批准，`run_command` 命中持久化程序白名单时自动批准，否则交给用户确认。
 4. 把结构化工具结果作为 `function_call_output` 发回模型。
 5. 模型不再调用工具时结束；超过最大轮数则强制停止。
 
@@ -93,7 +93,7 @@ npm run dev -- --workspace /path/to/project "修复失败的单元测试"
 npm run dev -- --interactive "先介绍项目结构"
 ```
 
-CLI 默认批准 workspace 内的结构化文件操作；每个 `run_command` 都会显示命令并询问。查看全部选项：
+CLI 默认批准 workspace 内的结构化文件操作；未命中程序白名单的 `run_command` 会显示命令并询问。查看全部选项：
 
 ```bash
 npm run dev -- --help
@@ -113,7 +113,18 @@ npm run dev -- --help
 
 `run_command` 接收完整的 Shell 命令字符串。Windows 使用无 Profile 的非交互 PowerShell；macOS 使用 `$SHELL`（未设置时回退 `/bin/zsh`），同样以非交互模式启动。当前 Shell 的名称和路径会写入模型 instructions，因此模型会使用对应语法。`&&`、管道、重定向、变量和其它 Shell 语法会直接交给 Shell 解析。
 
-Host 只验证 `run_command` 的工作目录仍在 workspace 内，同时移除名称类似 API key、token、secret、password 的环境变量，并限制执行时间和回传输出。Host 不再分析命令内容或区分风险等级：每个 `run_command` 都由用户确认，`--yes` 可以跳过确认。内置文件工具只能操作 workspace 内的路径，其新建、修改和删除操作默认批准。
+Host 验证 `run_command` 的工作目录仍在 workspace 内，同时移除名称类似 API key、token、secret、password 的环境变量，并限制执行时间和回传输出。直接执行的程序可以加入持久化白名单；命令检查只按 `&&` 和管道 `|` 切分，每段跳过开头的 `NAME=value` 环境变量赋值，并把第一个剩余 token 当作程序。提取出的程序全部在白名单中时自动执行。解析器暂不分析分号、重定向、命令替换、程序路径或其它 Shell 语法。`--yes` 可以跳过全部确认。内置文件工具只能操作 workspace 内的路径，其新建、修改和删除操作默认批准。
+
+程序白名单独立保存在启动目录的 `.config/command-allowlist.json`，与 `.config/config.json` 位于同一目录，且不受 `--workspace` 影响：
+
+```json
+{
+  "version": 1,
+  "programs": ["lark-cli"]
+}
+```
+
+审批提示中输入 `y` 仅批准本次，输入 `p` 会批准当前命令，并把其中由 `&&` 或管道连接的所有程序永久加入该文件；输入 `n` 或直接回车则拒绝。信任一个程序意味着它的所有直接子命令都会自动执行，例如信任 `lark-cli` 也会放行其删除命令。`--yes` 的全局批准行为保持不变。
 
 这套策略是教育项目中的防误操作边界，不是完整的操作系统沙箱。对不受信任的仓库执行构建脚本时，还应使用容器或 OS 沙箱限制文件系统和网络访问。
 
@@ -131,7 +142,7 @@ Host 只验证 `run_command` 的工作目录仍在 workspace 内，同时移除�
 - `/exit` 或 `/quit`：退出
 - `Ctrl+C` 或 `Ctrl+D`：关闭交互输入并退出
 
-`/new` 只重置模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；测试、构建等 `run_command` 调用仍需确认，`--yes` 可跳过该确认。
+`/new` 只重置模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；`run_command` 命中持久化程序白名单时自动执行，否则仍需确认，`--yes` 可跳过全部确认。
 
 ## 查看 OpenAI 原始请求和响应
 

@@ -260,7 +260,7 @@ describe("context discovery", () => {
     expect(instructions).toContain("macOS/BSD command conventions");
     expect(instructions).toContain("Shell: fish (/bin/fish), non-interactive");
     expect(instructions).toContain("including chaining, pipelines, redirects");
-    expect(instructions).toContain("Every run_command call requires host confirmation");
+    expect(instructions).toContain("persistent allowlist");
     expect(instructions).toContain("write_file for creation or intentional full replacement");
     expect(instructions).toContain("Load a relevant skill");
   });

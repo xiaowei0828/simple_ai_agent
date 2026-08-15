@@ -30,5 +30,7 @@ export {
   AutoApproveWorkspaceFileOperationsPolicy,
   CallbackApprovalPolicy,
   DenyAllApprovalPolicy,
+  extractSimpleCommandPrograms,
+  ProgramAllowlistApprovalPolicy,
 } from "./policy/approval-policy.js";
 export { createDefaultToolRegistry, ToolRegistry } from "./tools/index.js";
