@@ -29,7 +29,11 @@ export class JsonlTraceLogger implements OpenAITraceSink {
   }
 
   async close(): Promise<void> {
-    await this.#writeQueue;
+    await this.flush();
     await this.#file.close();
+  }
+
+  async flush(): Promise<void> {
+    await this.#writeQueue;
   }
 }

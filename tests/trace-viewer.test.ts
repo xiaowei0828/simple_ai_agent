@@ -1,4 +1,10 @@
+import { mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { defaultBrowserCommand } from "../src/cli/open-default-browser.js";
+import { generateTraceReport } from "../src/trace-viewer/generate-report.js";
+import { findLatestTraceFile } from "../src/trace-viewer/latest-trace.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { renderTraceReportHtml } from "../src/trace-viewer/render-html.js";
 
@@ -125,5 +131,36 @@ describe("trace viewer", () => {
     expect(report.warnings).toHaveLength(1);
     expect(report.turns[0]?.error).toMatchObject({ name: "BadRequest", status: 400 });
     expect(report.totals.errors).toBe(1);
+  });
+
+  it("finds the newest JSONL log and generates a standalone HTML report", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-latest-trace-"));
+    const olderPath = path.join(root, "older.jsonl");
+    const latestPath = path.join(root, "latest.jsonl");
+    const entry = JSON.stringify({
+      type: "openai.error",
+      timestamp: "2026-08-14T08:00:00.000Z",
+      traceId: "trace-error",
+      durationMs: 12,
+      error: { name: "BadRequest", message: "invalid input", status: 400 },
+    });
+    await writeFile(olderPath, entry, "utf8");
+    await writeFile(latestPath, entry, "utf8");
+    await utimes(olderPath, new Date(1_000), new Date(1_000));
+    await utimes(latestPath, new Date(2_000), new Date(2_000));
+
+    await expect(findLatestTraceFile(root)).resolves.toBe(latestPath);
+    const generated = await generateTraceReport(latestPath);
+    expect(generated.outputPath).toBe(path.join(root, "latest.html"));
+    expect(await readFile(generated.outputPath, "utf8")).toContain("<!doctype html>");
+  });
+
+  it("uses a direct platform command to open the report", () => {
+    expect(defaultBrowserCommand("C:\\trace.html", "win32")).toEqual({
+      program: "explorer.exe",
+      args: ["C:\\trace.html"],
+    });
+    expect(defaultBrowserCommand("/tmp/trace.html", "darwin").program).toBe("open");
+    expect(defaultBrowserCommand("/tmp/trace.html", "linux").program).toBe("xdg-open");
   });
 });

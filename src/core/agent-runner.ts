@@ -23,6 +23,7 @@ export interface AgentRunnerOptions {
 
 export interface AgentRunOptions {
   previousResponseId?: string;
+  model?: string;
 }
 
 export class AgentLimitError extends Error {
@@ -53,10 +54,11 @@ export class AgentRunner {
     await this.#emit({ type: "run_started", task: taskText });
     let input: string | ToolCallOutput[] = taskText;
     let previousResponseId = runOptions.previousResponseId;
+    const modelName = runOptions.model?.trim() || this.#options.modelName;
 
     for (let step = 1; step <= this.#options.maxSteps; step += 1) {
       const response = await this.#options.model.respond({
-        model: this.#options.modelName,
+        model: modelName,
         instructions: this.#options.instructions,
         input,
         previousResponseId,

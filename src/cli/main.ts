@@ -5,6 +5,12 @@ import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { runInteractiveSession } from "./interactive-session.js";
+import { openInDefaultBrowser } from "./open-default-browser.js";
+import {
+  loadAppConfig,
+  resolveAppConfigPath,
+  resolveRuntimeModelConfig,
+} from "../config/app-config.js";
 import { AgentRunner, DEFAULT_MAX_STEPS } from "../core/agent-runner.js";
 import type { AgentEvent, ApprovalRequest } from "../core/types.js";
 import { buildAgentInstructions } from "../context/build-instructions.js";
@@ -13,12 +19,17 @@ import { loadProjectInstructions } from "../context/instruction-loader.js";
 import { discoverSkills } from "../context/skill-registry.js";
 import { JsonlTraceLogger } from "../logging/jsonl-trace-logger.js";
 import { OpenAIModel } from "../model/openai-model.js";
-import { CallbackApprovalPolicy } from "../policy/approval-policy.js";
+import { generateTraceReport } from "../trace-viewer/generate-report.js";
+import { findLatestTraceFile } from "../trace-viewer/latest-trace.js";
+import {
+  AutoApproveWorkspaceFileOperationsPolicy,
+  CallbackApprovalPolicy,
+} from "../policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../tools/index.js";
 
 interface CliOptions {
   workspace: string;
-  model: string;
+  model?: string;
   maxSteps: number;
   skillRoots: string[];
   autoApprove: boolean;
@@ -28,25 +39,25 @@ interface CliOptions {
   task: string;
 }
 
-const DEFAULT_MODEL = "deepseek-v4-flash";
-const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
-
 const USAGE = `simple-code-agent [options] [task]
 
 Options:
   -w, --workspace <path>    Workspace root (default: current directory)
-  -m, --model <name>        Model name (default: ${DEFAULT_MODEL})
+  -m, --model <name>        Override the model configured in .config/config.json
       --max-steps <number>  Maximum model turns (default: ${DEFAULT_MAX_STEPS})
       --skill-root <path>   Additional directory containing <skill>/SKILL.md
       --debug               Write raw OpenAI request/response JSONL logs
   -i, --interactive         Continue interactively after an optional initial task
-  -y, --yes                 Approve all write and execute tool calls
+  -y, --yes                 Approve run_command calls without prompting
   -h, --help                Show this help
 
 Environment:
-  OPENAI_API_KEY                 Required API key
-  OPENAI_BASE_URL                Compatible API base URL (default: ${DEFAULT_BASE_URL})
+  OPENAI_API_KEY                 Override the configured API key
+  OPENAI_BASE_URL                Override the configured compatible API base URL
   CODE_AGENT_SKILL_ROOTS         Extra skill roots separated by the OS path delimiter
+
+Configuration:
+  .config/config.json            API key, base URL, default model, and available models
 
 Examples:
   npm run dev -- --workspace .
@@ -56,7 +67,6 @@ Examples:
 export function parseCliArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     workspace: process.cwd(),
-    model: DEFAULT_MODEL,
     maxSteps: DEFAULT_MAX_STEPS,
     skillRoots: [],
     autoApprove: false,
@@ -138,8 +148,15 @@ async function main(): Promise<void> {
     process.stdout.write(`${USAGE}\n`);
     return;
   }
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not set. Export it before running the agent.");
+  const configPath = resolveAppConfigPath();
+  const appConfig = await loadAppConfig(configPath);
+  const runtimeConfig = resolveRuntimeModelConfig(appConfig, {
+    apiKey: process.env.OPENAI_API_KEY,
+    baseUrl: process.env.OPENAI_BASE_URL,
+    model: options.model,
+  });
+  if (!runtimeConfig.apiKey) {
+    throw new Error(`API key is not configured. Set apiKey in '${configPath}' or OPENAI_API_KEY.`);
   }
 
   const workspaceRoot = await realpath(path.resolve(options.workspace));
@@ -167,6 +184,7 @@ async function main(): Promise<void> {
   const traceLogger = options.debug
     ? await JsonlTraceLogger.create(path.join(workspaceRoot, ".agent-runs"))
     : undefined;
+  const traceDirectory = path.join(workspaceRoot, ".agent-runs");
   if (traceLogger) {
     process.stderr.write(`agent: raw OpenAI log: ${traceLogger.filePath}\n`);
   }
@@ -180,7 +198,7 @@ async function main(): Promise<void> {
     readlineClosed = true;
   });
   readline?.on("SIGINT", () => readline.close());
-  const approvalPolicy = new CallbackApprovalPolicy(async (request: ApprovalRequest) => {
+  const interactiveApprovalPolicy = new CallbackApprovalPolicy(async (request: ApprovalRequest) => {
     if (options.autoApprove) return true;
     const preview = JSON.stringify(request.arguments, null, 2).slice(0, 2_000);
     const answer = await readline!.question(
@@ -188,15 +206,16 @@ async function main(): Promise<void> {
     );
     return /^(?:y|yes)$/i.test(answer.trim());
   });
+  const approvalPolicy = new AutoApproveWorkspaceFileOperationsPolicy(interactiveApprovalPolicy);
 
   try {
     const runner = new AgentRunner({
       model: new OpenAIModel({
-        apiKey: process.env.OPENAI_API_KEY,
-        baseURL: process.env.OPENAI_BASE_URL?.trim() || DEFAULT_BASE_URL,
+        apiKey: runtimeConfig.apiKey,
+        baseURL: runtimeConfig.baseUrl,
         traceSink: traceLogger,
       }),
-      modelName: options.model,
+      modelName: runtimeConfig.model,
       instructions: buildAgentInstructions(projectInstructions, skills, documents),
       tools: createDefaultToolRegistry(skills),
       toolContext: { workspaceRoot },
@@ -209,6 +228,18 @@ async function main(): Promise<void> {
       await runInteractiveSession({
         agent: runner,
         initialTask: options.task || undefined,
+        initialModel: runtimeConfig.model,
+        availableModels: appConfig.models.available,
+        async viewLatestTrace() {
+          await traceLogger?.flush();
+          const tracePath = traceLogger?.filePath ?? await findLatestTraceFile(traceDirectory);
+          if (!tracePath) {
+            throw new Error("No trace log found. Start the agent with --debug to record interactions.");
+          }
+          const generated = await generateTraceReport(tracePath);
+          await openInDefaultBrowser(generated.outputPath);
+          return generated.outputPath;
+        },
         io: {
           async prompt(label) {
             if (!readline || readlineClosed) return undefined;

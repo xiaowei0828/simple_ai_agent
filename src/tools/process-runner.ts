@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import path from "node:path";
 
 export interface RunProcessOptions {
-  program: string;
-  args: string[];
+  command: string;
   cwd: string;
   timeoutMs: number;
   maxOutputChars?: number;
@@ -15,6 +15,16 @@ export interface RunProcessResult {
   durationMs: number;
   output: string;
   truncated: boolean;
+}
+
+export interface ShellInvocation {
+  program: string;
+  args: string[];
+}
+
+export interface RuntimeShell {
+  executable: string;
+  displayName: string;
 }
 
 const DEFAULT_MAX_OUTPUT_CHARS = 30_000;
@@ -31,11 +41,13 @@ export async function runProcess(options: RunProcessOptions): Promise<RunProcess
   const startedAt = Date.now();
   const output = new BoundedOutput(options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS);
   const detached = process.platform !== "win32";
-  const child = spawn(options.program, options.args, {
+  const environment = sanitizedEnvironment();
+  const invocation = shellInvocation(options.command, process.platform, environment);
+  const child = spawn(invocation.program, invocation.args, {
     cwd: options.cwd,
     shell: false,
     detached,
-    env: sanitizedEnvironment(),
+    env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -76,6 +88,32 @@ export async function runProcess(options: RunProcessOptions): Promise<RunProcess
     output: output.render(),
     truncated: output.truncated,
   };
+}
+
+export function shellInvocation(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): ShellInvocation {
+  const shell = resolveRuntimeShell(platform, environment);
+  if (platform === "win32") {
+    return {
+      program: shell.executable,
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+    };
+  }
+  return { program: shell.executable, args: ["-c", command] };
+}
+
+export function resolveRuntimeShell(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): RuntimeShell {
+  if (platform === "win32") {
+    return { executable: "powershell.exe", displayName: "Windows PowerShell" };
+  }
+  const executable = environment.SHELL?.trim() || (platform === "darwin" ? "/bin/zsh" : "/bin/sh");
+  return { executable, displayName: path.basename(executable) || executable };
 }
 
 function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {

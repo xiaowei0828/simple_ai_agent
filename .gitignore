@@ -3,4 +3,6 @@ dist/
 .env
 *.log
 .agent-runs/
+.config/
 coverage/
+temp/

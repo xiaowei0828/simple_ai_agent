@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 
-import { chmod, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { parseOpenAITraceJsonl } from "../trace-viewer/parse-trace.js";
-import { renderTraceReportHtml } from "../trace-viewer/render-html.js";
+import { generateTraceReport, replaceExtension } from "../trace-viewer/generate-report.js";
 
 interface CliOptions {
   inputPath: string;
@@ -14,19 +12,10 @@ async function main(): Promise<void> {
   const options = parseArguments(process.argv.slice(2));
   if (!options) return;
 
-  const inputPath = path.resolve(options.inputPath);
-  const outputPath = path.resolve(options.outputPath);
-  if (inputPath === outputPath) {
-    throw new Error("输出路径不能与原始 JSONL 日志相同。");
-  }
-
-  const jsonl = await readFile(inputPath, "utf8");
-  const sourceName = path.relative(process.cwd(), inputPath) || path.basename(inputPath);
-  const report = parseOpenAITraceJsonl(jsonl, sourceName);
-  const html = renderTraceReportHtml(report);
-
-  await writeFile(outputPath, html, { encoding: "utf8", mode: 0o600 });
-  await chmod(outputPath, 0o600);
+  const { outputPath, report } = await generateTraceReport(
+    path.resolve(options.inputPath),
+    path.resolve(options.outputPath),
+  );
 
   console.log(`Trace report: ${outputPath}`);
   console.log(
@@ -71,11 +60,6 @@ function parseArguments(args: string[]): CliOptions | undefined {
     inputPath,
     outputPath: outputPath ?? replaceExtension(inputPath, ".html"),
   };
-}
-
-function replaceExtension(filePath: string, extension: string): string {
-  const parsed = path.parse(filePath);
-  return path.join(parsed.dir, `${parsed.name}${extension}`);
 }
 
 function printHelp(): void {

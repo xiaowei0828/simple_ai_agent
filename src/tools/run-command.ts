@@ -1,37 +1,31 @@
 import { stat } from "node:fs/promises";
 import { z } from "zod";
-import { assertCommandAllowed, formatCommand } from "../policy/command-policy.js";
 import { resolveExistingWorkspacePath, toWorkspaceRelative } from "../policy/path-policy.js";
-import { runProcess } from "./process-runner.js";
+import { resolveRuntimeShell, runProcess } from "./process-runner.js";
 import type { AgentTool } from "./types.js";
 
 const inputSchema = z.object({
-  program: z.string().trim().min(1).max(500),
-  args: z.array(z.string().max(10_000)).max(100).default([]),
+  command: z.string().trim().min(1).max(30_000),
   cwd: z.string().min(1).default("."),
   timeoutMs: z.number().int().min(1_000).max(900_000).default(120_000),
 }).strict();
 
 export function createRunCommandTool(): AgentTool<z.infer<typeof inputSchema>> {
+  const shell = resolveRuntimeShell();
   return {
     risk: "execute",
     definition: {
       type: "function",
       name: "run_command",
       description:
-        "Run one program with structured arguments inside the workspace. Use it for builds, tests, version control, and other commands not covered by a structured tool. Shell operators and destructive commands are not supported.",
+        `Run a command string in non-interactive ${shell.displayName}. Shell operators such as pipelines, redirects, and command chaining are evaluated by the shell. Use it for builds, tests, version control, and commands not covered by a structured tool.`,
       strict: true,
       parameters: {
         type: "object",
         properties: {
-          program: {
+          command: {
             type: "string",
-            description: "Executable name or path, such as 'cmake', 'npm', or './configure'.",
-          },
-          args: {
-            type: "array",
-            items: { type: "string" },
-            description: "Arguments passed directly to the executable without shell parsing.",
+            description: `Complete ${shell.displayName} command string. Shell syntax is supported.`,
           },
           cwd: {
             type: "string",
@@ -44,28 +38,22 @@ export function createRunCommandTool(): AgentTool<z.infer<typeof inputSchema>> {
             description: "Timeout in milliseconds.",
           },
         },
-        required: ["program", "args", "cwd", "timeoutMs"],
+        required: ["command", "cwd", "timeoutMs"],
         additionalProperties: false,
       },
     },
-    parse: (input) => {
-      const parsed = inputSchema.parse(input);
-      assertCommandAllowed(parsed.program, parsed.args);
-      return parsed;
-    },
+    parse: (input) => inputSchema.parse(input),
     async execute(input, context) {
-      assertCommandAllowed(input.program, input.args);
       const cwd = await resolveExistingWorkspacePath(context.workspaceRoot, input.cwd);
       if (!(await stat(cwd)).isDirectory()) throw new Error("run_command cwd must be a directory.");
 
       const result = await runProcess({
-        program: input.program,
-        args: input.args,
+        command: input.command,
         cwd,
         timeoutMs: input.timeoutMs,
       });
       return {
-        command: formatCommand(input.program, input.args),
+        command: input.command,
         cwd: toWorkspaceRelative(context.workspaceRoot, cwd),
         ...result,
       };

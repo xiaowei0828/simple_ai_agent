@@ -81,4 +81,71 @@ describe("runInteractiveSession", () => {
     expect(previousIds).toEqual([undefined, "response-1", "response-1"]);
     expect(statuses.some((output) => output.includes("temporary failure"))).toBe(true);
   });
+
+  it("lists configured models and switches by number or name", async () => {
+    const agent = new FakeInteractiveAgent();
+    const inputs = [
+      "first",
+      "/model",
+      "/model 2",
+      "second",
+      "/model model-a",
+      "third",
+      "/model missing",
+      "/exit",
+    ];
+    const statuses: string[] = [];
+
+    await runInteractiveSession({
+      agent,
+      initialModel: "model-a",
+      availableModels: ["model-a", "model-b"],
+      io: {
+        async prompt() {
+          return inputs.shift();
+        },
+        writeAssistant() {},
+        writeStatus(output) {
+          statuses.push(output);
+        },
+      },
+    });
+
+    expect(agent.calls).toEqual([
+      { task: "first", options: { previousResponseId: undefined, model: "model-a" } },
+      { task: "second", options: { previousResponseId: undefined, model: "model-b" } },
+      { task: "third", options: { previousResponseId: undefined, model: "model-a" } },
+    ]);
+    expect(statuses.some((output) => output.includes("* 1. model-a"))).toBe(true);
+    expect(statuses.some((output) => output.includes("Switched to model: model-b"))).toBe(true);
+    expect(statuses.some((output) => output.includes("Unknown model: missing"))).toBe(true);
+  });
+
+  it("opens the latest trace report without sending a model request", async () => {
+    const agent = new FakeInteractiveAgent();
+    const inputs = ["/trace", "/exit"];
+    const statuses: string[] = [];
+    let traceViews = 0;
+
+    await runInteractiveSession({
+      agent,
+      async viewLatestTrace() {
+        traceViews += 1;
+        return "C:\\workspace\\.agent-runs\\latest.html";
+      },
+      io: {
+        async prompt() {
+          return inputs.shift();
+        },
+        writeAssistant() {},
+        writeStatus(output) {
+          statuses.push(output);
+        },
+      },
+    });
+
+    expect(traceViews).toBe(1);
+    expect(agent.calls).toEqual([]);
+    expect(statuses.some((output) => output.includes("Opened trace report"))).toBe(true);
+  });
 });

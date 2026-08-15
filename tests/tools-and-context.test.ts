@@ -38,6 +38,14 @@ describe("workspace path policy", () => {
 
     await expect(resolveExistingWorkspacePath(root, ".agent-runs/run.jsonl")).rejects.toThrow("blocked");
   });
+
+  it("blocks local application configuration from model file tools", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-config-policy-"));
+    await mkdir(path.join(root, ".config"));
+    await writeFile(path.join(root, ".config", "config.json"), "{}\n", "utf8");
+
+    await expect(resolveExistingWorkspacePath(root, ".config/config.json")).rejects.toThrow("blocked");
+  });
 });
 
 describe("replace_in_file", () => {
@@ -186,6 +194,7 @@ describe("list_directory", () => {
     await mkdir(path.join(root, "docs"));
     await mkdir(path.join(root, "node_modules"));
     await mkdir(path.join(root, "build"));
+    await mkdir(path.join(root, ".config"));
     await writeFile(path.join(root, "README.md"), "# Example", "utf8");
     await writeFile(path.join(root, "src", "index.ts"), "export {};", "utf8");
     await writeFile(path.join(root, ".env"), "SECRET=value", "utf8");
@@ -243,12 +252,15 @@ describe("context discovery", () => {
       {
         platform: "darwin",
         architecture: "arm64",
+        shell: { executable: "/bin/fish", displayName: "fish" },
       },
     );
 
     expect(instructions).toContain("Runtime: darwin/arm64");
     expect(instructions).toContain("macOS/BSD command conventions");
-    expect(instructions).toContain("child_process.spawn(program, args, { shell: false })");
+    expect(instructions).toContain("Shell: fish (/bin/fish), non-interactive");
+    expect(instructions).toContain("including chaining, pipelines, redirects");
+    expect(instructions).toContain("Every run_command call requires host confirmation");
     expect(instructions).toContain("write_file for creation or intentional full replacement");
     expect(instructions).toContain("Load a relevant skill");
   });

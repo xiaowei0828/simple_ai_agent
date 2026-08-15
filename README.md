@@ -6,7 +6,7 @@
 
 - Responses API 的多轮工具调用循环，并通过 `previous_response_id` 延续交互式会话
 - 七个基础工具：`list_directory`、`read_file`、`search_code`、`write_file`、`replace_in_file`、`delete_file`、`run_command`；发现 Skill 时额外注册 `load_skill`
-- 写文件和执行进程前的人机审批；`--yes` 可用于受信环境
+- 工作区内的新建、修改、删除文件由宿主策略自动批准；每次 `run_command` 都需人机审批，`--yes` 可用于受信环境
 - 工作区路径限制、符号链接逃逸检查、常见密钥文件拦截
 - 测试子进程会移除名称类似 token、secret、password、API key 的环境变量
 - `AGENTS.md` / `AGENTS.override.md` 项目指令加载
@@ -35,7 +35,7 @@ flowchart LR
 
 1. 把任务、系统指令和工具 JSON Schema 发给模型。
 2. 如果模型返回 `function_call`，解析并用 Zod 校验参数。
-3. 读操作直接执行；写操作和进程执行先交给 `ApprovalPolicy`。
+3. 读操作直接执行；写操作和进程执行先交给 `ApprovalPolicy`。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
 4. 把结构化工具结果作为 `function_call_output` 发回模型。
 5. 模型不再调用工具时结束；超过最大轮数则强制停止。
 
@@ -47,11 +47,23 @@ flowchart LR
 
 ```bash
 npm install
-export OPENAI_API_KEY="your-api-key"
 npm run dev -- --workspace .
 ```
 
-默认使用模型 `deepseek-v4-flash` 和兼容 Responses API 的 Base URL `https://ark.cn-beijing.volces.com/api/plan/v3`。仍可通过 `--model` 和 `OPENAI_BASE_URL` 覆盖：
+启动时会读取当前目录的 `.config/config.json`：
+
+```json
+{
+  "apiKey": "your-api-key",
+  "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
+  "models": {
+    "default": "deepseek-v4-flash",
+    "available": ["deepseek-v4-flash"]
+  }
+}
+```
+
+`.config/` 已被 Git 和 Agent 文件工具忽略，避免 API Key 被提交或重新送入模型上下文。`models.default` 必须出现在 `models.available` 中。命令行 `--model` 可覆盖默认模型，`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 可覆盖配置文件中的对应值：
 
 ```bash
 export OPENAI_BASE_URL="https://provider.example.com/v1"
@@ -81,7 +93,7 @@ npm run dev -- --workspace /path/to/project "修复失败的单元测试"
 npm run dev -- --interactive "先介绍项目结构"
 ```
 
-CLI 会在每次 `write_file`、`replace_in_file`、`delete_file` 和 `run_command` 前显示参数并询问。查看全部选项：
+CLI 默认批准 workspace 内的结构化文件操作；每个 `run_command` 都会显示命令并询问。查看全部选项：
 
 ```bash
 npm run dev -- --help
@@ -93,16 +105,15 @@ npm run dev -- --help
 
 ```json
 {
-  "program": "cmake",
-  "args": ["-S", ".", "-B", "build"],
+  "command": "cmake -S . -B build && cmake --build build",
   "cwd": ".",
   "timeoutMs": 600000
 }
 ```
 
-命令使用 Node.js `spawn(program, args, { shell: false })` 执行，因此 `&&`、管道、重定向和变量展开不会被当作 Shell 语法解释。需要连续执行时，模型应发起多个工具调用。
+`run_command` 接收完整的 Shell 命令字符串。Windows 使用无 Profile 的非交互 PowerShell；macOS 使用 `$SHELL`（未设置时回退 `/bin/zsh`），同样以非交互模式启动。当前 Shell 的名称和路径会写入模型 instructions，因此模型会使用对应语法。`&&`、管道、重定向、变量和其它 Shell 语法会直接交给 Shell 解析。
 
-Host 会验证工作目录仍在 workspace 内，移除名称类似 API key、token、secret、password 的环境变量，并限制执行时间和回传输出。`rm`、`sudo`、`git reset --hard`、`git clean`、`find -delete` 以及 `bash -c`、`node -e` 等绕过结构化参数的入口会直接拒绝。其他进程执行仍走人机审批；`--yes` 只跳过审批，不能绕过高危命令策略。
+Host 只验证 `run_command` 的工作目录仍在 workspace 内，同时移除名称类似 API key、token、secret、password 的环境变量，并限制执行时间和回传输出。Host 不再分析命令内容或区分风险等级：每个 `run_command` 都由用户确认，`--yes` 可以跳过确认。内置文件工具只能操作 workspace 内的路径，其新建、修改和删除操作默认批准。
 
 这套策略是教育项目中的防误操作边界，不是完整的操作系统沙箱。对不受信任的仓库执行构建脚本时，还应使用容器或 OS 沙箱限制文件系统和网络访问。
 
@@ -112,12 +123,15 @@ Host 会验证工作目录仍在 workspace 内，移除名称类似 API key、to
 
 交互命令：
 
+- `/model`：显示当前模型以及 `.config/config.json` 中的可用模型
+- `/model <序号或名称>`：切换模型并开启新对话，例如 `/model 2` 或 `/model glm-5.3`
+- `/trace`：把当前或最近的 `.agent-runs/*.jsonl` 生成为 HTML，并用系统默认浏览器打开
 - `/new`：清空当前会话 ID，下一条消息开启独立对话
 - `/help`：显示命令帮助
 - `/exit` 或 `/quit`：退出
 - `Ctrl+C` 或 `Ctrl+D`：关闭交互输入并退出
 
-`/new` 只重置模型对话，不会撤销已经修改的工作区文件。写文件和运行测试仍然逐次请求审批；`--yes` 会自动批准这些操作。
+`/new` 只重置模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；测试、构建等 `run_command` 调用仍需确认，`--yes` 可跳过该确认。
 
 ## 查看 OpenAI 原始请求和响应
 
@@ -126,6 +140,8 @@ Host 会验证工作目录仍在 workspace 内，移除名称类似 API key、to
 ```bash
 npm run dev -- --workspace . --debug
 ```
+
+交互模式中输入 `/trace` 可以随时生成当前日志的 Trace Viewer 报告并自动打开浏览器；如果当前会话没有启用 `--debug`，则尝试打开工作区中最近一次已有日志。若没有任何日志，会提示使用 `--debug` 重新启动。
 
 启动时会显示日志的绝对路径：
 

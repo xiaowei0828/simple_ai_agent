@@ -30,6 +30,25 @@ async function fixture(): Promise<string> {
 }
 
 describe("AgentRunner", () => {
+  it("allows one run to override the configured model", async () => {
+    const root = await fixture();
+    const model = new ScriptedModel([
+      { id: "response-override", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model,
+      modelName: "default-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry([]),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new DenyAllApprovalPolicy(),
+    });
+
+    await runner.run("use another model", { model: "selected-model" });
+
+    expect(model.requests[0]?.model).toBe("selected-model");
+  });
+
   it("continues a conversation from a response ID supplied by the host", async () => {
     const root = await fixture();
     const model = new ScriptedModel([

@@ -27,6 +27,7 @@ export type {
 } from "./trace-viewer/types.js";
 export {
   AllowAllApprovalPolicy,
+  AutoApproveWorkspaceFileOperationsPolicy,
   CallbackApprovalPolicy,
   DenyAllApprovalPolicy,
 } from "./policy/approval-policy.js";
