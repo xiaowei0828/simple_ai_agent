@@ -1,0 +1,37 @@
+README.md
+  s_6b27153cb2f90a::t_b4a6dc2128be41 9,38,96,116-127,145
+src/cli/main.ts
+  s_6b27153cb2f90a::t_99e2fbe06aa48f 9-12,31-32,67,171-172,213-224,226,228-239,241-243
+src/config/command-allowlist.ts
+  s_6b27153cb2f90a::t_343b79d97d79f1 1-121
+src/context/build-instructions.ts
+  s_6b27153cb2f90a::t_612585a481c36a 37
+src/index.ts
+  s_6b27153cb2f90a::t_5407ebda979866 33-34
+src/policy/approval-policy.ts
+  s_6b27153cb2f90a::t_aef60b71869b58 33-53,68-86
+tests/command-allowlist.test.ts
+  s_6b27153cb2f90a::t_fe85f3433e5bad 1-46
+tests/run-command.test.ts
+  s_6b27153cb2f90a::t_0a9141377733b4 9-10,44-113
+tests/tools-and-context.test.ts
+  s_6b27153cb2f90a::t_fdce7466bb5f0b 263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "aa0aeff70f61bc8893c597dba55f8252a1355df5",
+  "prompts": {},
+  "sessions": {
+    "s_6b27153cb2f90a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ffe22-0dff-7e33-96a8-b73815c49fdc",
+        "model": "unknown"
+      },
+      "human_author": "weirongbin <weirongbin@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}
