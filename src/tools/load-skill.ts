@@ -13,12 +13,12 @@ function isInside(root: string, candidate: string): boolean {
 
 export function createLoadSkillTool(
   skills: SkillMetadata[],
-): AgentTool<{ name: string; resource: string | null }> {
+): AgentTool<{ name: string; resource: string }> {
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
   const names = skills.map((skill) => skill.name);
   const inputSchema = z.object({
     name: z.string().min(1),
-    resource: z.string().min(1).nullable(),
+    resource: z.string().min(1),
   }).strict();
 
   return {
@@ -27,16 +27,16 @@ export function createLoadSkillTool(
       type: "function",
       name: "load_skill",
       description:
-        "Load a skill entry point or one of its referenced UTF-8 resources. Use resource=null for SKILL.md; otherwise pass a path relative to that skill's directory. To reference another skill, call load_skill with that skill's name.",
+        "Load a skill entry point or one of its referenced UTF-8 resources. Use resource=\"SKILL.md\" for the entry point; otherwise pass a path relative to that skill's directory. To reference another skill, call load_skill with that skill's name.",
       strict: true,
       parameters: {
         type: "object",
         properties: {
           name: { type: "string", enum: names },
           resource: {
-            type: ["string", "null"],
+            type: "string",
             minLength: 1,
-            description: "Null for SKILL.md, or a skill-relative path such as references/workflow.md.",
+            description: "Use SKILL.md for the entry point, or a skill-relative path such as references/workflow.md.",
           },
         },
         required: ["name", "resource"],
@@ -46,7 +46,7 @@ export function createLoadSkillTool(
     parse(input) {
       const parsed = inputSchema.parse(input);
       if (!byName.has(parsed.name)) throw new Error(`Unknown skill: ${parsed.name}`);
-      if (parsed.resource !== null && path.isAbsolute(parsed.resource)) {
+      if (path.isAbsolute(parsed.resource)) {
         throw new Error("Skill resource paths must be relative.");
       }
       return parsed;
@@ -58,7 +58,7 @@ export function createLoadSkillTool(
       const mainFile = await realpath(skill.filePath);
       const skillRoot = path.dirname(mainFile);
       let resourcePath = mainFile;
-      if (input.resource !== null) {
+      if (input.resource !== "SKILL.md") {
         const lexicalCandidate = path.resolve(skillRoot, input.resource);
         if (!isInside(skillRoot, lexicalCandidate) || lexicalCandidate === skillRoot) {
           throw new Error("Skill resource path escapes the selected skill directory.");
@@ -78,7 +78,7 @@ export function createLoadSkillTool(
       if (content.includes("\0")) throw new Error("Binary skill resources are not supported.");
       return {
         name: skill.name,
-        resource: input.resource ?? "SKILL.md",
+        resource: input.resource,
         content: content.slice(0, MAX_SKILL_CHARS),
         truncated: content.length > MAX_SKILL_CHARS,
       };

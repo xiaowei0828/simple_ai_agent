@@ -328,7 +328,7 @@ routing: Targeted code review.
     }]);
 
     await expect(tool.execute(
-      tool.parse({ name: "review", resource: null }),
+      tool.parse({ name: "review", resource: "SKILL.md" }),
       { workspaceRoot: root },
     )).resolves.toMatchObject({
       name: "review",
@@ -343,6 +343,7 @@ routing: Targeted code review.
       resource: "references/checks.md",
       content: "# Checks",
     });
+    expect(() => tool.parse({ name: "review", resource: null })).toThrow();
     await expect(tool.execute(
       tool.parse({ name: "review", resource: "../outside.md" }),
       { workspaceRoot: root },

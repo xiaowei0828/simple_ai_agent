@@ -6,3 +6,4 @@ dist/
 .config/
 coverage/
 temp/
+.DS_Store

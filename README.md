@@ -242,7 +242,7 @@ npm run dev -- --skill-root ./examples/skills '$code-review 检查当前实现'
 启动阶段只向模型提供 Skill 名称和不超过 80 字符的 `routing`；没有 `routing` 时使用截短的 `description`。模型使用下面的调用读取 Skill 入口：
 
 ```json
-{ "name": "code-review", "resource": null }
+{ "name": "code-review", "resource": "SKILL.md" }
 ```
 
 如果 `SKILL.md` 引用了同一 Skill 目录下的其他文件，仍通过 `load_skill` 渐进读取：
