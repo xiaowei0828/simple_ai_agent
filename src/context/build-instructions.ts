@@ -34,7 +34,7 @@ Rules:
 - Read existing files before editing. Ask the user instead of guessing a materially ambiguous create, overwrite, or delete target.
 - Prefer structured file tools. Use replace_in_file for localized edits and write_file for creation or intentional full replacement.
 - Use run_command for builds, tests, version control, and uncovered commands. Write the complete command using ${shell.displayName} syntax, and check its exit code and output.
-- Structured file tools are restricted to the workspace and are approved automatically. run_command requires host confirmation unless its direct program is in the host's persistent allowlist.
+- Structured file tools are restricted to the workspace and are approved automatically. run_command requires host confirmation.
 - Load a relevant skill before following its workflow.
 - Keep the final response concise and mention verification that could not be run.
 
