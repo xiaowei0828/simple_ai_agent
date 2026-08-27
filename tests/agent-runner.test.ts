@@ -49,6 +49,26 @@ describe("AgentRunner", () => {
     expect(model.requests[0]?.model).toBe("selected-model");
   });
 
+  it("requests configured reasoning summaries on every model turn", async () => {
+    const root = await fixture();
+    const model = new ScriptedModel([
+      { id: "response-1", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model,
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry([]),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new DenyAllApprovalPolicy(),
+      reasoningSummary: "detailed",
+    });
+
+    await runner.run("explain the project");
+
+    expect(model.requests[0]?.reasoningSummary).toBe("detailed");
+  });
+
   it("continues a conversation from a response ID supplied by the host", async () => {
     const root = await fixture();
     const model = new ScriptedModel([
@@ -67,6 +87,52 @@ describe("AgentRunner", () => {
 
     expect(model.requests[0]?.previousResponseId).toBe("response-previous");
     expect(model.requests[0]?.instructions).toBe("test instructions");
+  });
+
+  it("replays local user and assistant messages when no response ID is available", async () => {
+    const root = await fixture();
+    const model = new ScriptedModel([
+      { id: "response-next", outputText: "Continued answer.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model,
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+    });
+
+    await runner.run("Follow up.", {
+      history: [
+        { role: "user", content: "Earlier question." },
+        { role: "assistant", content: "Earlier answer." },
+      ],
+    });
+
+    expect(model.requests[0]?.previousResponseId).toBeUndefined();
+    expect(model.requests[0]?.input).toEqual([
+      { role: "user", content: "Earlier question." },
+      { role: "assistant", content: "Earlier answer." },
+      { role: "user", content: "Follow up." },
+    ]);
+  });
+
+  it("rejects ambiguous continuation state", async () => {
+    const root = await fixture();
+    const runner = new AgentRunner({
+      model: new ScriptedModel([]),
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+    });
+
+    await expect(runner.run("Follow up.", {
+      previousResponseId: "response-previous",
+      history: [{ role: "user", content: "Earlier question." }],
+    })).rejects.toThrow("cannot be used together");
   });
 
   it("executes a tool call and sends its output to the next model turn", async () => {

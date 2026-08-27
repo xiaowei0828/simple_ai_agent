@@ -7,6 +7,7 @@ import type {
   ResponseInputItem,
 } from "openai/resources/responses/responses";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "../core/types.js";
+import { PreviousResponseUnavailableError } from "../core/errors.js";
 import type { OpenAITraceSink } from "../logging/openai-trace.js";
 
 export interface OpenAIModelOptions {
@@ -20,6 +21,7 @@ export class OpenAIModel implements ModelAdapter {
   readonly #client: OpenAI;
   readonly #traceSink?: OpenAITraceSink;
   readonly #endpoint: string;
+  readonly #reasoningSummaryUnsupportedModels = new Set<string>();
 
   constructor(options: OpenAIModelOptions = {}) {
     this.#client = options.client ?? new OpenAI({
@@ -31,6 +33,21 @@ export class OpenAIModel implements ModelAdapter {
   }
 
   async respond(request: ModelRequest): Promise<ModelResponse> {
+    if (!request.reasoningSummary || this.#reasoningSummaryUnsupportedModels.has(request.model)) {
+      return this.#respondOnce({ ...request, reasoningSummary: undefined });
+    }
+
+    try {
+      return await this.#respondOnce(request);
+    } catch (error) {
+      if (!isReasoningSummaryUnsupported(error)) throw error;
+      this.#reasoningSummaryUnsupportedModels.add(request.model);
+      const response = await this.#respondOnce({ ...request, reasoningSummary: undefined });
+      return { ...response, reasoningSummaryUnavailable: true };
+    }
+  }
+
+  async #respondOnce(request: ModelRequest): Promise<ModelResponse> {
     const input = typeof request.input === "string"
       ? request.input
       : request.input as ResponseInputItem[];
@@ -40,6 +57,9 @@ export class OpenAIModel implements ModelAdapter {
       instructions: request.instructions,
       input,
       previous_response_id: request.previousResponseId,
+      reasoning: request.reasoningSummary
+        ? { summary: request.reasoningSummary }
+        : undefined,
       tools: request.tools as FunctionTool[],
       parallel_tool_calls: false,
       store: true,
@@ -69,6 +89,9 @@ export class OpenAIModel implements ModelAdapter {
         durationMs: Math.round(performance.now() - startedAt),
         error: serializeError(error),
       });
+      if (request.previousResponseId && isPreviousResponseUnavailable(error)) {
+        throw new PreviousResponseUnavailableError(request.previousResponseId, error);
+      }
       throw error;
     }
 
@@ -92,6 +115,7 @@ export class OpenAIModel implements ModelAdapter {
     return {
       id: response.id,
       outputText: response.output_text,
+      reasoningSummary: extractReasoningSummary(response),
       toolCalls: response.output
         .filter((item) => item.type === "function_call")
         .map((item) => ({
@@ -101,6 +125,45 @@ export class OpenAIModel implements ModelAdapter {
         })),
     };
   }
+}
+
+function extractReasoningSummary(response: OpenAIResponse): string | undefined {
+  const summary = response.output
+    .filter((item) => item.type === "reasoning")
+    .flatMap((item) => item.summary ?? [])
+    .map((part) => part.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  return summary || undefined;
+}
+
+function isReasoningSummaryUnsupported(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const details = error as { status?: unknown; message?: unknown; error?: unknown };
+  const status = typeof details.status === "number" ? details.status : undefined;
+  if (status !== 400 && status !== 422) return false;
+
+  const description = JSON.stringify({
+    message: details.message,
+    error: details.error,
+  });
+  return /reasoning/iu.test(description)
+    && /summary|unsupported|not supported|unknown|unrecognized|invalid|extra/iu.test(description);
+}
+
+function isPreviousResponseUnavailable(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const details = error as { status?: unknown; message?: unknown; error?: unknown };
+  const status = typeof details.status === "number" ? details.status : undefined;
+  if (status === 410) return true;
+  if (status !== 400 && status !== 404 && status !== 422) return false;
+
+  const description = JSON.stringify({
+    message: details.message,
+    error: details.error,
+  });
+  return /previous[_\s-]*response|(?:response|resp[_-])[^\n]{0,80}(?:not found|expired|missing|invalid)/iu
+    .test(description);
 }
 
 function createLoggableEndpoint(baseURL: string): string {

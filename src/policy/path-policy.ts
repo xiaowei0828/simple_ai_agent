@@ -1,7 +1,13 @@
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 
-const BLOCKED_SEGMENTS = new Set([".agent-runs", ".config", ".git", "node_modules"]);
+const BLOCKED_SEGMENTS = new Set([
+  ".agent-runs",
+  ".agent-history",
+  ".config",
+  ".git",
+  "node_modules",
+]);
 const SENSITIVE_FILE_PATTERNS = [
   /^\.env(?:\.|$)/i,
   /^\.(?:netrc|npmrc|pypirc)$/i,
@@ -21,7 +27,9 @@ export function assertSafeRelativePath(relativePath: string): void {
 
   const segments = relativePath.split(/[\\/]+/).filter(Boolean);
   if (segments.some((segment) => BLOCKED_SEGMENTS.has(segment))) {
-    throw new Error("Access to .agent-runs, .config, .git, and node_modules is blocked.");
+    throw new Error(
+      "Access to .agent-runs, .agent-history, .config, .git, and node_modules is blocked.",
+    );
   }
 
   const basename = segments.at(-1) ?? "";

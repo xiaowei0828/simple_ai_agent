@@ -59,11 +59,14 @@ npm run dev -- --workspace .
   "models": {
     "default": "deepseek-v4-flash",
     "available": ["deepseek-v4-flash"]
-  }
+  },
+  "reasoningSummary": "auto"
 }
 ```
 
-`.config/` 已被 Git 和 Agent 文件工具忽略，避免 API Key 被提交或重新送入模型上下文。`models.default` 必须出现在 `models.available` 中。命令行 `--model` 可覆盖默认模型，`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 可覆盖配置文件中的对应值：
+`.config/` 已被 Git 和 Agent 文件工具忽略，避免 API Key 被提交或重新送入模型上下文。`models.default` 必须出现在 `models.available` 中。`reasoningSummary` 控制是否请求并在 console 中显示模型提供的推理摘要，可选值为 `off`、`auto`、`concise` 或 `detailed`，省略时默认为 `auto`。命令行 `--model` 可覆盖默认模型，`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 可覆盖配置文件中的对应值：
+
+这里只显示 API 返回的 reasoning summary，不是模型未公开的完整思维链。如果兼容接口明确拒绝 reasoning summary 参数，CLI 会提示一次，自动重试普通请求，并在当前进程内不再为该模型请求摘要。
 
 ```bash
 export OPENAI_BASE_URL="https://provider.example.com/v1"
@@ -75,6 +78,7 @@ npm run dev -- --workspace . --model "provider-model"
 ```text
 Interactive mode. Type /help for commands.
 agent> 阅读这个项目，说明 Agent 的工具调用链路
+thinking> 我需要先查看项目结构以及 AgentRunner 的实现。
 assistant> ...
 
 agent> 继续解释工具审批是怎么实现的
@@ -121,17 +125,26 @@ Host 验证 `run_command` 的工作目录仍在 workspace 内，同时移除名�
 
 每轮成功响应的 `responseId` 会作为下一轮请求的 `previous_response_id`，因此“继续解释”“修改刚才提到的文件”等追问能看到此前上下文。具体机制参考 OpenAI 官方的 [conversation state](https://developers.openai.com/api/docs/guides/conversation-state)。
 
+成功完成的交互会话还会保存在工作区的 `.agent-history/` 中。直接启动交互模式且没有传入初始任务时，CLI 会列出最近的历史会话，可以输入序号或 ID 前缀继续，也可以输入 `0` 开启新对话。恢复会话时优先使用保存的 `responseId`；如果兼容 API 已经删除了对应的远端 response，则自动回放本地保存的 user/assistant 消息并建立新的 response 链。
+
+每个历史文件包含会话标题、模型、时间、最后一个 response ID 以及成功完成的消息轮次。默认标题取第一条用户消息的前 60 个字符，使用 `/rename` 可以修改。历史按工作区隔离，不会在不同代码仓库之间混用。
+
 交互命令：
 
 - `/model`：显示当前模型以及 `.config/config.json` 中的可用模型
 - `/model <序号或名称>`：切换模型并开启新对话，例如 `/model 2` 或 `/model glm-5.3`
+- `/history`：列出当前工作区保存的历史会话
+- `/resume <序号或 ID 前缀>`：切换到某一个历史会话
+- `/rename <标题>`：重命名当前历史会话
 - `/trace`：把当前或最近的 `.agent-runs/*.jsonl` 生成为 HTML，并用系统默认浏览器打开
-- `/new`：清空当前会话 ID，下一条消息开启独立对话
+- `/new`：保留当前历史并让下一条消息开启独立对话
 - `/help`：显示命令帮助
 - `/exit` 或 `/quit`：退出
 - `Ctrl+C` 或 `Ctrl+D`：关闭交互输入并退出
 
-`/new` 只重置模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；`run_command` 仍需逐次确认，`--yes` 可跳过确认。
+`/new` 和 `/resume` 只切换模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；`run_command` 仍需逐次确认，`--yes` 可跳过确认。
+
+`.agent-history/` 已被 Git 和 Agent 文件工具忽略。历史中仍可能包含用户输入、模型回复、源码片段或路径，因此不应把该目录提交或共享给其他人。
 
 ## 查看 OpenAI 原始请求和响应
 
@@ -162,7 +175,8 @@ agent: raw OpenAI log: /path/to/project/.agent-runs/2026-08-14T15-10-00-000Z-123
 
 - `.agent-runs/` 已被当前仓库的 `.gitignore` 忽略
 - Agent 文件工具也禁止读取 `.agent-runs/`，避免日志再次进入模型上下文
-- 对其他目标项目使用 `--workspace` 时，建议把 `.agent-runs/` 加入该项目的 `.gitignore`
+- `.agent-history/` 同样被 `.gitignore` 和 Agent 文件工具屏蔽
+- 对其他目标项目使用 `--workspace` 时，建议把 `.agent-runs/` 和 `.agent-history/` 加入该项目的 `.gitignore`
 
 可以用 `jq` 格式化查看：
 

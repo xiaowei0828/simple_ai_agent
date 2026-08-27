@@ -4,6 +4,7 @@ import { z } from "zod";
 
 export const DEFAULT_MODEL = "deepseek-v4-flash";
 export const DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
+export const DEFAULT_REASONING_SUMMARY = "auto" as const;
 
 const appConfigSchema = z.object({
   apiKey: z.string(),
@@ -12,6 +13,7 @@ const appConfigSchema = z.object({
     default: z.string().trim().min(1),
     available: z.array(z.string().trim().min(1)).min(1),
   }).strict(),
+  reasoningSummary: z.enum(["off", "auto", "concise", "detailed"]).optional(),
 }).strict().superRefine((config, context) => {
   if (!config.models.available.includes(config.models.default)) {
     context.addIssue({
@@ -37,6 +39,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     default: DEFAULT_MODEL,
     available: [DEFAULT_MODEL],
   },
+  reasoningSummary: DEFAULT_REASONING_SUMMARY,
 };
 
 export function resolveAppConfigPath(cwd: string = process.cwd()): string {

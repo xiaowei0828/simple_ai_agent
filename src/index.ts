@@ -1,13 +1,23 @@
 export { AgentLimitError, AgentRunner, DEFAULT_MAX_STEPS } from "./core/agent-runner.js";
 export type { AgentRunOptions } from "./core/agent-runner.js";
+export { PreviousResponseUnavailableError } from "./core/errors.js";
 export type {
   AgentEvent,
   AgentRunResult,
   ApprovalPolicy,
+  ConversationMessage,
   ModelAdapter,
   ModelRequest,
   ModelResponse,
+  ReasoningSummaryMode,
 } from "./core/types.js";
+export { JsonConversationStore, createConversationTitle } from "./history/conversation-store.js";
+export type {
+  Conversation,
+  ConversationStore,
+  ConversationSummary,
+  ConversationTurn,
+} from "./history/conversation-store.js";
 export { buildAgentInstructions } from "./context/build-instructions.js";
 export { discoverMarkdownDocuments, formatDocumentCatalog } from "./context/document-catalog.js";
 export { loadProjectInstructions } from "./context/instruction-loader.js";

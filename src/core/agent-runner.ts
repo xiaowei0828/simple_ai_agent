@@ -2,7 +2,10 @@ import type {
   AgentEventHandler,
   AgentRunResult,
   ApprovalPolicy,
+  ConversationMessage,
   ModelAdapter,
+  ModelInputItem,
+  ReasoningSummaryMode,
   ToolCallOutput,
 } from "./types.js";
 import type { ToolContext, ToolRegistry } from "../tools/types.js";
@@ -18,12 +21,14 @@ export interface AgentRunnerOptions {
   approvalPolicy: ApprovalPolicy;
   maxSteps?: number;
   maxToolOutputChars?: number;
+  reasoningSummary?: ReasoningSummaryMode;
   onEvent?: AgentEventHandler;
 }
 
 export interface AgentRunOptions {
   previousResponseId?: string;
   model?: string;
+  history?: ConversationMessage[];
 }
 
 export class AgentLimitError extends Error {
@@ -50,9 +55,14 @@ export class AgentRunner {
     if (!taskText) {
       throw new Error("Task cannot be empty.");
     }
+    if (runOptions.previousResponseId && runOptions.history?.length) {
+      throw new Error("previousResponseId and history cannot be used together.");
+    }
 
     await this.#emit({ type: "run_started", task: taskText });
-    let input: string | ToolCallOutput[] = taskText;
+    let input: string | ModelInputItem[] = runOptions.history?.length
+      ? [...runOptions.history, { role: "user", content: taskText }]
+      : taskText;
     let previousResponseId = runOptions.previousResponseId;
     const modelName = runOptions.model?.trim() || this.#options.modelName;
 
@@ -62,6 +72,7 @@ export class AgentRunner {
         instructions: this.#options.instructions,
         input,
         previousResponseId,
+        reasoningSummary: this.#options.reasoningSummary,
         tools: this.#options.tools.definitions(),
       });
       previousResponseId = response.id;

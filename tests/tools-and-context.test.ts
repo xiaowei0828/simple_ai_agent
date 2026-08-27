@@ -35,8 +35,12 @@ describe("workspace path policy", () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-trace-policy-"));
     await mkdir(path.join(root, ".agent-runs"));
     await writeFile(path.join(root, ".agent-runs", "run.jsonl"), "{}\n", "utf8");
+    await mkdir(path.join(root, ".agent-history"));
+    await writeFile(path.join(root, ".agent-history", "conversation.json"), "{}\n", "utf8");
 
     await expect(resolveExistingWorkspacePath(root, ".agent-runs/run.jsonl")).rejects.toThrow("blocked");
+    await expect(resolveExistingWorkspacePath(root, ".agent-history/conversation.json"))
+      .rejects.toThrow("blocked");
   });
 
   it("blocks local application configuration from model file tools", async () => {

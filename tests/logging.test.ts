@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
+import { PreviousResponseUnavailableError } from "../src/core/errors.js";
 import { JsonlTraceLogger } from "../src/logging/jsonl-trace-logger.js";
 import type { OpenAITraceEntry } from "../src/logging/openai-trace.js";
 import { OpenAIModel } from "../src/model/openai-model.js";
@@ -34,7 +35,9 @@ describe("raw OpenAI logging", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toMatchObject({ type: "openai.request", body: { input: "hello" } });
     expect(lines[1]).toMatchObject({ type: "openai.response", requestId: "req-1" });
-    expect((await stat(logger.filePath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect((await stat(logger.filePath)).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("captures the SDK request body and full parsed response without credentials", async () => {
@@ -51,13 +54,21 @@ describe("raw OpenAI logging", () => {
           created_at: 1,
           status: "completed",
           model: "test-model",
-          output: [{
-            id: "msg-test",
-            type: "message",
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text: "hello", annotations: [], logprobs: [] }],
-          }],
+          output: [
+            {
+              id: "reasoning-test",
+              type: "reasoning",
+              status: "completed",
+              summary: [{ type: "summary_text", text: "I should answer briefly." }],
+            },
+            {
+              id: "msg-test",
+              type: "message",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: "hello", annotations: [], logprobs: [] }],
+            },
+          ],
           usage: {
             input_tokens: 3,
             input_tokens_details: { cached_tokens: 0 },
@@ -89,15 +100,21 @@ describe("raw OpenAI logging", () => {
       instructions: "full instructions",
       input: "hello",
       previousResponseId: "resp-previous",
+      reasoningSummary: "auto",
       tools: [],
     });
 
-    expect(result).toMatchObject({ id: "resp-test", outputText: "hello" });
+    expect(result).toMatchObject({
+      id: "resp-test",
+      outputText: "hello",
+      reasoningSummary: "I should answer briefly.",
+    });
     expect(JSON.parse(transmittedBody)).toMatchObject({
       model: "test-model",
       instructions: "full instructions",
       input: "hello",
       previous_response_id: "resp-previous",
+      reasoning: { summary: "auto" },
       store: true,
     });
     expect(traces[0]).toMatchObject({
@@ -112,5 +129,96 @@ describe("raw OpenAI logging", () => {
     });
     expect(JSON.stringify(traces)).not.toContain("api-key-that-must-not-be-logged");
     expect(JSON.stringify(traces)).not.toContain("must-not-be-logged");
+  });
+
+  it("retries without reasoning summaries when a compatible endpoint rejects them", async () => {
+    const transmittedBodies: Array<Record<string, unknown>> = [];
+    let requestCount = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+      fetch: async (_input, init) => {
+        requestCount += 1;
+        transmittedBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        if (requestCount === 1) {
+          return new Response(JSON.stringify({
+            error: {
+              message: "Unknown parameter: reasoning.summary",
+              type: "invalid_request_error",
+            },
+          }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({
+          id: `resp-${requestCount}`,
+          object: "response",
+          created_at: 1,
+          status: "completed",
+          model: "test-model",
+          output: [{
+            id: `msg-${requestCount}`,
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "hello", annotations: [], logprobs: [] }],
+          }],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 1,
+            output_tokens_details: { reasoning_tokens: 0 },
+            total_tokens: 2,
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const model = new OpenAIModel({ client });
+    const request = {
+      model: "test-model",
+      instructions: "test instructions",
+      input: "hello",
+      reasoningSummary: "auto" as const,
+      tools: [],
+    };
+
+    const recovered = await model.respond(request);
+    const cachedFallback = await model.respond(request);
+
+    expect(recovered.reasoningSummaryUnavailable).toBe(true);
+    expect(cachedFallback.reasoningSummaryUnavailable).toBeUndefined();
+    expect(requestCount).toBe(3);
+    expect(transmittedBodies[0]).toMatchObject({ reasoning: { summary: "auto" } });
+    expect(transmittedBodies[1]).not.toHaveProperty("reasoning");
+    expect(transmittedBodies[2]).not.toHaveProperty("reasoning");
+  });
+
+  it("classifies an unavailable previous response for local replay", async () => {
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+      fetch: async () => new Response(JSON.stringify({
+        error: {
+          message: "The previous_response_id was not found.",
+          type: "invalid_request_error",
+        },
+      }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    });
+    const model = new OpenAIModel({ client });
+
+    await expect(model.respond({
+      model: "test-model",
+      instructions: "test instructions",
+      input: "follow up",
+      previousResponseId: "response-old",
+      tools: [],
+    })).rejects.toBeInstanceOf(PreviousResponseUnavailableError);
   });
 });

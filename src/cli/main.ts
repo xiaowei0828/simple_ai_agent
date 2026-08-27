@@ -8,6 +8,7 @@ import { runInteractiveSession } from "./interactive-session.js";
 import { openInDefaultBrowser } from "./open-default-browser.js";
 import {
   loadAppConfig,
+  DEFAULT_REASONING_SUMMARY,
   resolveAppConfigPath,
   resolveRuntimeModelConfig,
 } from "../config/app-config.js";
@@ -18,6 +19,7 @@ import { discoverMarkdownDocuments } from "../context/document-catalog.js";
 import { loadProjectInstructions } from "../context/instruction-loader.js";
 import { discoverSkills } from "../context/skill-registry.js";
 import { JsonlTraceLogger } from "../logging/jsonl-trace-logger.js";
+import { JsonConversationStore } from "../history/conversation-store.js";
 import { OpenAIModel } from "../model/openai-model.js";
 import { generateTraceReport } from "../trace-viewer/generate-report.js";
 import { findLatestTraceFile } from "../trace-viewer/latest-trace.js";
@@ -127,6 +129,14 @@ function logEvent(event: AgentEvent): void {
       break;
     case "model_response":
       process.stderr.write(`agent: model turn ${event.step}, ${event.response.toolCalls.length} tool call(s)\n`);
+      if (event.response.reasoningSummaryUnavailable) {
+        process.stderr.write(
+          "agent: reasoning summaries are unsupported by this model; continuing without them\n",
+        );
+      }
+      if (event.response.reasoningSummary) {
+        process.stderr.write(`${prefixLines("thinking> ", event.response.reasoningSummary)}\n`);
+      }
       break;
     case "tool_requested":
       process.stderr.write(`agent: requesting ${event.call.name}${event.risk ? ` [${event.risk}]` : ""}\n`);
@@ -140,6 +150,10 @@ function logEvent(event: AgentEvent): void {
     default:
       break;
   }
+}
+
+function prefixLines(prefix: string, value: string): string {
+  return value.split(/\r?\n/u).map((line) => `${prefix}${line}`).join("\n");
 }
 
 async function main(): Promise<void> {
@@ -184,6 +198,11 @@ async function main(): Promise<void> {
     ? await JsonlTraceLogger.create(path.join(workspaceRoot, ".agent-runs"))
     : undefined;
   const traceDirectory = path.join(workspaceRoot, ".agent-runs");
+  const historyStore = new JsonConversationStore(path.join(workspaceRoot, ".agent-history"), {
+    onWarning(message) {
+      process.stderr.write(`agent: ${message}\n`);
+    },
+  });
   if (traceLogger) {
     process.stderr.write(`agent: raw OpenAI log: ${traceLogger.filePath}\n`);
   }
@@ -223,6 +242,9 @@ async function main(): Promise<void> {
       toolContext: { workspaceRoot },
       approvalPolicy,
       maxSteps: options.maxSteps,
+      reasoningSummary: appConfig.reasoningSummary === "off"
+        ? undefined
+        : appConfig.reasoningSummary ?? DEFAULT_REASONING_SUMMARY,
       onEvent: logEvent,
     });
 
@@ -232,6 +254,7 @@ async function main(): Promise<void> {
         initialTask: options.task || undefined,
         initialModel: runtimeConfig.model,
         availableModels: appConfig.models.available,
+        historyStore,
         async viewLatestTrace() {
           await traceLogger?.flush();
           const tracePath = traceLogger?.filePath ?? await findLatestTraceFile(traceDirectory);

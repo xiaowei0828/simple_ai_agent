@@ -20,17 +20,28 @@ export interface ToolCallOutput {
   output: string;
 }
 
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export type ModelInputItem = ConversationMessage | ToolCallOutput;
+export type ReasoningSummaryMode = "auto" | "concise" | "detailed";
+
 export interface ModelRequest {
   model: string;
   instructions: string;
-  input: string | ToolCallOutput[];
+  input: string | ModelInputItem[];
   previousResponseId?: string;
+  reasoningSummary?: ReasoningSummaryMode;
   tools: ToolDefinition[];
 }
 
 export interface ModelResponse {
   id: string;
   outputText: string;
+  reasoningSummary?: string;
+  reasoningSummaryUnavailable?: boolean;
   toolCalls: ModelToolCall[];
 }
 

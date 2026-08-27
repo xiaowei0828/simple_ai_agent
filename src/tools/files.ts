@@ -4,6 +4,7 @@ import path from "node:path";
 export const IGNORED_DIRECTORIES = new Set([
   ".git",
   ".agent-runs",
+  ".agent-history",
   ".config",
   "node_modules",
   "dist",

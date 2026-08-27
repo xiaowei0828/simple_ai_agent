@@ -19,6 +19,7 @@ describe("application configuration", () => {
         default: "model-b",
         available: ["model-a", "model-b"],
       },
+      reasoningSummary: "detailed",
     }), "utf8");
 
     await expect(loadAppConfig(configPath)).resolves.toEqual({
@@ -28,6 +29,7 @@ describe("application configuration", () => {
         default: "model-b",
         available: ["model-a", "model-b"],
       },
+      reasoningSummary: "detailed",
     });
   });
 
@@ -62,5 +64,18 @@ describe("application configuration", () => {
     }), "utf8");
 
     await expect(loadAppConfig(configPath)).rejects.toThrow("Invalid configuration file");
+  });
+
+  it("rejects an unknown reasoning summary mode", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-invalid-reasoning-"));
+    const configPath = path.join(root, "config.json");
+    await writeFile(configPath, JSON.stringify({
+      apiKey: "key",
+      baseUrl: "https://example.test/v1",
+      models: { default: "model", available: ["model"] },
+      reasoningSummary: "everything",
+    }), "utf8");
+
+    await expect(loadAppConfig(configPath)).rejects.toThrow("reasoningSummary");
   });
 });
