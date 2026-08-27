@@ -5,6 +5,7 @@ import type {
   ConversationMessage,
   ModelAdapter,
   ModelInputItem,
+  ModelResponse,
   ReasoningSummaryMode,
   ToolCallOutput,
 } from "./types.js";
@@ -22,6 +23,7 @@ export interface AgentRunnerOptions {
   maxSteps?: number;
   maxToolOutputChars?: number;
   reasoningSummary?: ReasoningSummaryMode;
+  stream?: boolean;
   onEvent?: AgentEventHandler;
 }
 
@@ -39,14 +41,17 @@ export class AgentLimitError extends Error {
 }
 
 export class AgentRunner {
-  readonly #options: Required<Pick<AgentRunnerOptions, "maxSteps" | "maxToolOutputChars">> &
-    Omit<AgentRunnerOptions, "maxSteps" | "maxToolOutputChars">;
+  readonly #options: Required<Pick<
+    AgentRunnerOptions,
+    "maxSteps" | "maxToolOutputChars" | "stream"
+  >> & Omit<AgentRunnerOptions, "maxSteps" | "maxToolOutputChars" | "stream">;
 
   constructor(options: AgentRunnerOptions) {
     this.#options = {
       ...options,
       maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
       maxToolOutputChars: options.maxToolOutputChars ?? 20_000,
+      stream: options.stream ?? false,
     };
   }
 
@@ -67,14 +72,28 @@ export class AgentRunner {
     const modelName = runOptions.model?.trim() || this.#options.modelName;
 
     for (let step = 1; step <= this.#options.maxSteps; step += 1) {
-      const response = await this.#options.model.respond({
-        model: modelName,
-        instructions: this.#options.instructions,
-        input,
-        previousResponseId,
-        reasoningSummary: this.#options.reasoningSummary,
-        tools: this.#options.tools.definitions(),
-      });
+      let response: ModelResponse;
+      try {
+        response = await this.#options.model.respond({
+          model: modelName,
+          instructions: this.#options.instructions,
+          input,
+          previousResponseId,
+          reasoningSummary: this.#options.reasoningSummary,
+          stream: this.#options.stream,
+          onStreamEvent: this.#options.stream
+            ? async (event) => {
+                await this.#emit(event.type === "output_text_delta"
+                  ? { type: "model_output_delta", step, delta: event.delta }
+                  : { type: "model_reasoning_delta", step, delta: event.delta });
+              }
+            : undefined,
+          tools: this.#options.tools.definitions(),
+        });
+      } catch (error) {
+        await this.#emit({ type: "model_response_failed", step });
+        throw error;
+      }
       previousResponseId = response.id;
       await this.#emit({ type: "model_response", step, response });
 

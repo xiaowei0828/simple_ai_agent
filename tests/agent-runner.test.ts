@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentLimitError, AgentRunner } from "../src/core/agent-runner.js";
-import type { ModelAdapter, ModelRequest, ModelResponse } from "../src/core/types.js";
+import type {
+  AgentEvent,
+  ModelAdapter,
+  ModelRequest,
+  ModelResponse,
+} from "../src/core/types.js";
 import { AllowAllApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
 
@@ -67,6 +72,49 @@ describe("AgentRunner", () => {
     await runner.run("explain the project");
 
     expect(model.requests[0]?.reasoningSummary).toBe("detailed");
+  });
+
+  it("forwards model deltas when streaming is enabled", async () => {
+    const root = await fixture();
+    const events: AgentEvent[] = [];
+    const model: ModelAdapter = {
+      async respond(request) {
+        expect(request.stream).toBe(true);
+        await request.onStreamEvent?.({
+          type: "reasoning_summary_delta",
+          delta: "Inspect the project.",
+        });
+        await request.onStreamEvent?.({ type: "output_text_delta", delta: "Done." });
+        return {
+          id: "response-streamed",
+          outputText: "Done.",
+          reasoningSummary: "Inspect the project.",
+          toolCalls: [],
+        };
+      },
+    };
+    const runner = new AgentRunner({
+      model,
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry([]),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new DenyAllApprovalPolicy(),
+      stream: true,
+      onEvent(event) {
+        events.push(event);
+      },
+    });
+
+    const result = await runner.run("explain the project");
+
+    expect(result.output).toBe("Done.");
+    expect(events).toContainEqual({
+      type: "model_reasoning_delta",
+      step: 1,
+      delta: "Inspect the project.",
+    });
+    expect(events).toContainEqual({ type: "model_output_delta", step: 1, delta: "Done." });
   });
 
   it("continues a conversation from a response ID supplied by the host", async () => {

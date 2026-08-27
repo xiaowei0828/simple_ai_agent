@@ -28,12 +28,22 @@ export interface ConversationMessage {
 export type ModelInputItem = ConversationMessage | ToolCallOutput;
 export type ReasoningSummaryMode = "auto" | "concise" | "detailed";
 
+export type ModelStreamEvent =
+  | { type: "output_text_delta"; delta: string }
+  | { type: "reasoning_summary_delta"; delta: string };
+
+export type ModelStreamEventHandler = (
+  event: ModelStreamEvent,
+) => void | Promise<void>;
+
 export interface ModelRequest {
   model: string;
   instructions: string;
   input: string | ModelInputItem[];
   previousResponseId?: string;
   reasoningSummary?: ReasoningSummaryMode;
+  stream?: boolean;
+  onStreamEvent?: ModelStreamEventHandler;
   tools: ToolDefinition[];
 }
 
@@ -61,6 +71,9 @@ export interface ApprovalPolicy {
 
 export type AgentEvent =
   | { type: "run_started"; task: string }
+  | { type: "model_output_delta"; step: number; delta: string }
+  | { type: "model_reasoning_delta"; step: number; delta: string }
+  | { type: "model_response_failed"; step: number }
   | { type: "model_response"; step: number; response: ModelResponse }
   | { type: "tool_requested"; step: number; call: ModelToolCall; risk?: ToolRisk }
   | { type: "approval_requested"; step: number; request: ApprovalRequest }

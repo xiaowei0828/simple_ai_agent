@@ -13,6 +13,7 @@
 - Markdown 文档目录：只注入路径和标题，需要时再读取正文
 - 本地 Skill 目录：只注入名称和描述，需要时通过 `load_skill` 加载完整 `SKILL.md`
 - `--debug` 将每次 OpenAI 原始请求和完整响应写入私有 JSONL 日志
+- `--stream` 通过 Responses API 事件流实时显示推理摘要和回答正文
 - 可替换的 `ModelAdapter`，测试使用假模型，不消耗 API 调用
 
 ## 运行原理
@@ -96,6 +97,15 @@ npm run dev -- --workspace /path/to/project "修复失败的单元测试"
 ```bash
 npm run dev -- --interactive "先介绍项目结构"
 ```
+
+默认使用非流式响应。需要实时显示模型输出时，只需增加 `--stream`，不需要修改配置文件：
+
+```bash
+npm run dev -- --stream --workspace .
+npm run dev -- --stream --interactive "先介绍项目结构"
+```
+
+流式模式只实时展示增量内容；工具调用仍会等待完整参数生成后再校验和审批，历史记录也只在收到最终响应后保存。
 
 CLI 默认批准 workspace 内的结构化文件操作；每次 `run_command` 都会显示命令并询问。查看全部选项：
 

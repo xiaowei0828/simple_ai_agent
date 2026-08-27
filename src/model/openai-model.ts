@@ -4,6 +4,7 @@ import type {
   FunctionTool,
   Response as OpenAIResponse,
   ResponseCreateParamsNonStreaming,
+  ResponseCreateParamsStreaming,
   ResponseInputItem,
 } from "openai/resources/responses/responses";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "../core/types.js";
@@ -15,6 +16,12 @@ export interface OpenAIModelOptions {
   baseURL?: string;
   client?: OpenAI;
   traceSink?: OpenAITraceSink;
+}
+
+interface CompletedResponseWithHttp {
+  data: OpenAIResponse;
+  response: globalThis.Response;
+  request_id: string | null;
 }
 
 export class OpenAIModel implements ModelAdapter {
@@ -52,7 +59,7 @@ export class OpenAIModel implements ModelAdapter {
       ? request.input
       : request.input as ResponseInputItem[];
 
-    const body: ResponseCreateParamsNonStreaming = {
+    const nonStreamingBody: ResponseCreateParamsNonStreaming = {
       model: request.model,
       instructions: request.instructions,
       input,
@@ -64,6 +71,9 @@ export class OpenAIModel implements ModelAdapter {
       parallel_tool_calls: false,
       store: true,
     };
+    const body = request.stream
+      ? { ...nonStreamingBody, stream: true } satisfies ResponseCreateParamsStreaming
+      : nonStreamingBody;
     const traceId = randomUUID();
     await this.#traceSink?.log({
       type: "openai.request",
@@ -74,13 +84,11 @@ export class OpenAIModel implements ModelAdapter {
     });
 
     const startedAt = performance.now();
-    let result: {
-      data: OpenAIResponse;
-      response: globalThis.Response;
-      request_id: string | null;
-    };
+    let result: CompletedResponseWithHttp;
     try {
-      result = await this.#client.responses.create(body).withResponse();
+      result = request.stream
+        ? await this.#createStreamingResponse(body as ResponseCreateParamsStreaming, request)
+        : await this.#client.responses.create(nonStreamingBody).withResponse();
     } catch (error) {
       await this.#traceSink?.log({
         type: "openai.error",
@@ -114,7 +122,7 @@ export class OpenAIModel implements ModelAdapter {
 
     return {
       id: response.id,
-      outputText: response.output_text,
+      outputText: response.output_text ?? extractOutputText(response),
       reasoningSummary: extractReasoningSummary(response),
       toolCalls: response.output
         .filter((item) => item.type === "function_call")
@@ -125,6 +133,49 @@ export class OpenAIModel implements ModelAdapter {
         })),
     };
   }
+
+  async #createStreamingResponse(
+    body: ResponseCreateParamsStreaming,
+    request: ModelRequest,
+  ): Promise<CompletedResponseWithHttp> {
+    const result = await this.#client.responses.create(body).withResponse();
+    let response: OpenAIResponse | undefined;
+
+    for await (const event of result.data) {
+      switch (event.type) {
+        case "response.output_text.delta":
+          await request.onStreamEvent?.({ type: "output_text_delta", delta: event.delta });
+          break;
+        case "response.reasoning_summary_text.delta":
+          await request.onStreamEvent?.({ type: "reasoning_summary_delta", delta: event.delta });
+          break;
+        case "response.completed":
+        case "response.incomplete":
+          response = event.response;
+          break;
+        case "response.failed":
+          throw new Error(event.response.error?.message ?? "The streaming response failed.");
+        case "error":
+          throw new Error(event.message);
+        default:
+          break;
+      }
+    }
+
+    if (!response) {
+      throw new Error("The streaming response ended before returning a final response.");
+    }
+    return { ...result, data: response };
+  }
+}
+
+function extractOutputText(response: OpenAIResponse): string {
+  return response.output
+    .filter((item) => item.type === "message")
+    .flatMap((item) => item.content)
+    .filter((part) => part.type === "output_text")
+    .map((part) => part.text)
+    .join("");
 }
 
 function extractReasoningSummary(response: OpenAIResponse): string | undefined {

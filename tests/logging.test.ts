@@ -4,6 +4,7 @@ import path from "node:path";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 import { PreviousResponseUnavailableError } from "../src/core/errors.js";
+import type { ModelStreamEvent } from "../src/core/types.js";
 import { JsonlTraceLogger } from "../src/logging/jsonl-trace-logger.js";
 import type { OpenAITraceEntry } from "../src/logging/openai-trace.js";
 import { OpenAIModel } from "../src/model/openai-model.js";
@@ -117,6 +118,7 @@ describe("raw OpenAI logging", () => {
       reasoning: { summary: "auto" },
       store: true,
     });
+    expect(JSON.parse(transmittedBody)).not.toHaveProperty("stream");
     expect(traces[0]).toMatchObject({
       type: "openai.request",
       body: { instructions: "full instructions", input: "hello" },
@@ -129,6 +131,141 @@ describe("raw OpenAI logging", () => {
     });
     expect(JSON.stringify(traces)).not.toContain("api-key-that-must-not-be-logged");
     expect(JSON.stringify(traces)).not.toContain("must-not-be-logged");
+  });
+
+  it("streams reasoning and output deltas while returning the completed response", async () => {
+    const emitted: ModelStreamEvent[] = [];
+    const traces: OpenAITraceEntry[] = [];
+    let transmittedBody = "";
+    const finalResponse = {
+      id: "resp-stream",
+      object: "response",
+      created_at: 1,
+      status: "completed",
+      model: "test-model",
+      output: [
+        {
+          id: "reasoning-stream",
+          type: "reasoning",
+          status: "completed",
+          summary: [{ type: "summary_text", text: "Inspect the project." }],
+        },
+        {
+          id: "msg-stream",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "hello", annotations: [], logprobs: [] }],
+        },
+      ],
+      usage: {
+        input_tokens: 3,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 1,
+        output_tokens_details: { reasoning_tokens: 0 },
+        total_tokens: 4,
+      },
+    };
+    const streamEvents = [
+      {
+        type: "response.reasoning_summary_text.delta",
+        item_id: "reasoning-stream",
+        output_index: 0,
+        summary_index: 0,
+        delta: "Inspect ",
+        sequence_number: 1,
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        item_id: "reasoning-stream",
+        output_index: 0,
+        summary_index: 0,
+        delta: "the project.",
+        sequence_number: 2,
+      },
+      {
+        type: "response.output_text.delta",
+        item_id: "msg-stream",
+        output_index: 1,
+        content_index: 0,
+        delta: "hel",
+        logprobs: [],
+        sequence_number: 3,
+      },
+      {
+        type: "response.output_text.delta",
+        item_id: "msg-stream",
+        output_index: 1,
+        content_index: 0,
+        delta: "lo",
+        logprobs: [],
+        sequence_number: 4,
+      },
+      {
+        type: "response.completed",
+        response: finalResponse,
+        sequence_number: 5,
+      },
+    ];
+    const eventStream = `${streamEvents
+      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      .join("")}data: [DONE]\n\n`;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+      fetch: async (_input, init) => {
+        transmittedBody = String(init?.body ?? "");
+        return new Response(eventStream, {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "x-request-id": "req-stream",
+          },
+        });
+      },
+    });
+    const model = new OpenAIModel({
+      client,
+      traceSink: {
+        async log(entry) {
+          traces.push(entry);
+        },
+      },
+    });
+
+    const result = await model.respond({
+      model: "test-model",
+      instructions: "test instructions",
+      input: "hello",
+      reasoningSummary: "auto",
+      stream: true,
+      async onStreamEvent(event) {
+        emitted.push(event);
+      },
+      tools: [],
+    });
+
+    expect(JSON.parse(transmittedBody)).toMatchObject({
+      model: "test-model",
+      stream: true,
+      reasoning: { summary: "auto" },
+    });
+    expect(emitted).toEqual([
+      { type: "reasoning_summary_delta", delta: "Inspect " },
+      { type: "reasoning_summary_delta", delta: "the project." },
+      { type: "output_text_delta", delta: "hel" },
+      { type: "output_text_delta", delta: "lo" },
+    ]);
+    expect(result).toMatchObject({
+      id: "resp-stream",
+      outputText: "hello",
+      reasoningSummary: "Inspect the project.",
+    });
+    expect(traces[1]).toMatchObject({
+      type: "openai.response",
+      requestId: "req-stream",
+      body: { id: "resp-stream", usage: { total_tokens: 4 } },
+    });
   });
 
   it("retries without reasoning summaries when a compatible endpoint rejects them", async () => {

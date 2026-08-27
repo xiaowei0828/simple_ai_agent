@@ -9,6 +9,8 @@ export type {
   ModelAdapter,
   ModelRequest,
   ModelResponse,
+  ModelStreamEvent,
+  ModelStreamEventHandler,
   ReasoningSummaryMode,
 } from "./core/types.js";
 export { JsonConversationStore, createConversationTitle } from "./history/conversation-store.js";

@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
+import { createConsoleEventLogger } from "./console-event-logger.js";
 import { runInteractiveSession } from "./interactive-session.js";
 import { openInDefaultBrowser } from "./open-default-browser.js";
 import {
@@ -13,7 +14,7 @@ import {
   resolveRuntimeModelConfig,
 } from "../config/app-config.js";
 import { AgentRunner, DEFAULT_MAX_STEPS } from "../core/agent-runner.js";
-import type { AgentEvent, ApprovalRequest } from "../core/types.js";
+import type { ApprovalRequest } from "../core/types.js";
 import { buildAgentInstructions } from "../context/build-instructions.js";
 import { discoverMarkdownDocuments } from "../context/document-catalog.js";
 import { loadProjectInstructions } from "../context/instruction-loader.js";
@@ -36,6 +37,7 @@ interface CliOptions {
   skillRoots: string[];
   autoApprove: boolean;
   interactive: boolean;
+  stream: boolean;
   debug: boolean;
   help: boolean;
   task: string;
@@ -48,6 +50,7 @@ Options:
   -m, --model <name>        Override the model configured in .config/config.json
       --max-steps <number>  Maximum model turns (default: ${DEFAULT_MAX_STEPS})
       --skill-root <path>   Additional directory containing <skill>/SKILL.md
+      --stream              Stream model output as it is generated
       --debug               Write raw OpenAI request/response JSONL logs
   -i, --interactive         Continue interactively after an optional initial task
   -y, --yes                 Approve run_command calls without prompting
@@ -73,6 +76,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     skillRoots: [],
     autoApprove: false,
     interactive: false,
+    stream: false,
     debug: false,
     help: false,
     task: "",
@@ -87,6 +91,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
     }
     if (argument === "-h" || argument === "--help") {
       options.help = true;
+    } else if (argument === "--stream") {
+      options.stream = true;
     } else if (argument === "--debug") {
       options.debug = true;
     } else if (argument === "-i" || argument === "--interactive") {
@@ -120,40 +126,6 @@ function requireValue(argv: string[], index: number, option: string): string {
   const value = argv[index];
   if (!value) throw new Error(`${option} requires a value.`);
   return value;
-}
-
-function logEvent(event: AgentEvent): void {
-  switch (event.type) {
-    case "run_started":
-      process.stderr.write(`agent: started\n`);
-      break;
-    case "model_response":
-      process.stderr.write(`agent: model turn ${event.step}, ${event.response.toolCalls.length} tool call(s)\n`);
-      if (event.response.reasoningSummaryUnavailable) {
-        process.stderr.write(
-          "agent: reasoning summaries are unsupported by this model; continuing without them\n",
-        );
-      }
-      if (event.response.reasoningSummary) {
-        process.stderr.write(`${prefixLines("thinking> ", event.response.reasoningSummary)}\n`);
-      }
-      break;
-    case "tool_requested":
-      process.stderr.write(`agent: requesting ${event.call.name}${event.risk ? ` [${event.risk}]` : ""}\n`);
-      break;
-    case "tool_completed":
-      process.stderr.write(`agent: ${event.toolName} completed\n`);
-      break;
-    case "tool_failed":
-      process.stderr.write(`agent: ${event.toolName} failed: ${event.error}\n`);
-      break;
-    default:
-      break;
-  }
-}
-
-function prefixLines(prefix: string, value: string): string {
-  return value.split(/\r?\n/u).map((line) => `${prefix}${line}`).join("\n");
 }
 
 async function main(): Promise<void> {
@@ -208,6 +180,10 @@ async function main(): Promise<void> {
   }
 
   const interactiveMode = options.interactive || !options.task;
+  const logEvent = createConsoleEventLogger({
+    stream: options.stream,
+    interactive: interactiveMode,
+  });
   const readline = interactiveMode || !options.autoApprove
     ? createInterface({ input: process.stdin, output: process.stderr })
     : undefined;
@@ -242,6 +218,7 @@ async function main(): Promise<void> {
       toolContext: { workspaceRoot },
       approvalPolicy,
       maxSteps: options.maxSteps,
+      stream: options.stream,
       reasoningSummary: appConfig.reasoningSummary === "off"
         ? undefined
         : appConfig.reasoningSummary ?? DEFAULT_REASONING_SUMMARY,
@@ -276,7 +253,7 @@ async function main(): Promise<void> {
             }
           },
           writeAssistant(output) {
-            process.stdout.write(`assistant> ${output}\n\n`);
+            if (!options.stream) process.stdout.write(`assistant> ${output}\n\n`);
           },
           writeStatus(output) {
             process.stderr.write(`${output}\n`);
@@ -285,7 +262,7 @@ async function main(): Promise<void> {
       });
     } else {
       const result = await runner.run(options.task);
-      process.stdout.write(`${result.output}\n`);
+      if (!options.stream) process.stdout.write(`${result.output}\n`);
     }
   } finally {
     readline?.close();
