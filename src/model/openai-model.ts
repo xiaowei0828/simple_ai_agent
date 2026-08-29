@@ -15,12 +15,6 @@ export interface OpenAIModelOptions {
   apiKey?: string;
   baseURL?: string;
   client?: OpenAI;
-  /**
-   * Extra retries for a response body that ends before a usable response is
-   * available. Connection and response-header retries remain owned by the SDK.
-   * Defaults to 1 and accepts values from 0 through 3.
-   */
-  maxTransportRetries?: number;
   parallelToolCalls?: boolean;
   traceSink?: OpenAITraceSink;
 }
@@ -33,26 +27,17 @@ interface CompletedResponseWithHttp {
 
 export class OpenAIModel implements ModelAdapter {
   readonly #client: OpenAI;
-  readonly #maxTransportRetries: number;
   readonly #parallelToolCalls: boolean;
   readonly #traceSink?: OpenAITraceSink;
   readonly #endpoint: string;
   readonly #reasoningSummaryUnsupportedModels = new Set<string>();
 
   constructor(options: OpenAIModelOptions = {}) {
-    const maxTransportRetries = options.maxTransportRetries ?? 1;
-    if (
-      !Number.isInteger(maxTransportRetries)
-      || maxTransportRetries < 0
-      || maxTransportRetries > 3
-    ) {
-      throw new RangeError("maxTransportRetries must be an integer from 0 through 3.");
-    }
     this.#client = options.client ?? new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,
+      maxRetries: 0,
     });
-    this.#maxTransportRetries = maxTransportRetries;
     this.#parallelToolCalls = options.parallelToolCalls ?? true;
     this.#traceSink = options.traceSink;
     this.#endpoint = createLoggableEndpoint(this.#client.baseURL);
@@ -60,45 +45,19 @@ export class OpenAIModel implements ModelAdapter {
 
   async respond(request: ModelRequest): Promise<ModelResponse> {
     if (!request.reasoningSummary || this.#reasoningSummaryUnsupportedModels.has(request.model)) {
-      return this.#respondWithTransportRetry({ ...request, reasoningSummary: undefined });
+      return this.#respondOnce({ ...request, reasoningSummary: undefined });
     }
 
     try {
-      return await this.#respondWithTransportRetry(request);
+      return await this.#respondOnce(request);
     } catch (error) {
       if (!isReasoningSummaryUnsupported(error)) throw error;
       this.#reasoningSummaryUnsupportedModels.add(request.model);
-      const response = await this.#respondWithTransportRetry({
+      const response = await this.#respondOnce({
         ...request,
         reasoningSummary: undefined,
       });
       return { ...response, reasoningSummaryUnavailable: true };
-    }
-  }
-
-  async #respondWithTransportRetry(request: ModelRequest): Promise<ModelResponse> {
-    for (let attempt = 0; ; attempt += 1) {
-      let streamProgressSeen = false;
-      const attemptRequest = request.stream
-        ? {
-            ...request,
-            onStreamEvent: async (event: Parameters<NonNullable<ModelRequest["onStreamEvent"]>>[0]) => {
-              // Once any user-visible delta escapes this adapter, replaying the
-              // request could duplicate or fork the displayed response.
-              streamProgressSeen = true;
-              await request.onStreamEvent?.(event);
-            },
-          }
-        : request;
-      try {
-        return await this.#respondOnce(attemptRequest);
-      } catch (error) {
-        const retriesRemain = attempt < this.#maxTransportRetries;
-        const retryIsSafe = !request.stream || !streamProgressSeen;
-        if (!retriesRemain || !retryIsSafe || !isRetryableTransportError(error)) {
-          throw error;
-        }
-      }
     }
   }
 
@@ -207,24 +166,17 @@ export class OpenAIModel implements ModelAdapter {
           // terminal event without invalidating the response we already have.
           return { ...result, data: event.response };
         case "response.failed":
-          throw new NonRetryableStreamingError(
+          throw new Error(
             event.response.error?.message ?? "The streaming response failed.",
           );
         case "error":
-          throw new NonRetryableStreamingError(event.message);
+          throw new Error(event.message);
         default:
           break;
       }
     }
 
     throw new Error("The streaming response ended before returning a final response.");
-  }
-}
-
-class NonRetryableStreamingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NonRetryableStreamingError";
   }
 }
 
@@ -270,41 +222,6 @@ function isReasoningSummaryUnsupported(error: unknown): boolean {
   });
   return /reasoning/iu.test(description)
     && /summary|unsupported|not supported|unknown|unrecognized|invalid|extra/iu.test(description);
-}
-
-function isRetryableTransportError(error: unknown): boolean {
-  if (error instanceof NonRetryableStreamingError) return false;
-
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current; depth += 1) {
-    if (typeof current !== "object") break;
-    const details = current as {
-      name?: unknown;
-      message?: unknown;
-      code?: unknown;
-      status?: unknown;
-      cause?: unknown;
-    };
-    if (details.name === "AbortError" || details.name === "APIUserAbortError") return false;
-    // The OpenAI SDK already applies its own retry policy before surfacing
-    // APIConnection errors. This adapter only adds a bounded body-level retry.
-    if (typeof details.name === "string" && /^APIConnection/u.test(details.name)) return false;
-    if (typeof details.status === "number") return false;
-    if (
-      typeof details.code === "string"
-      && /^(?:ECONNRESET|EPIPE|ETIMEDOUT|UND_ERR_(?:BODY_TIMEOUT|HEADERS_TIMEOUT|SOCKET|CONNECT_TIMEOUT))$/u.test(details.code)
-    ) {
-      return true;
-    }
-    if (typeof details.message === "string" && (
-      /\bterminated\b|premature(?:ly)? close|socket hang up/iu.test(details.message)
-      || details.message === "The streaming response ended before returning a final response."
-    )) {
-      return true;
-    }
-    current = details.cause;
-  }
-  return false;
 }
 
 function isPreviousResponseUnavailable(error: unknown): boolean {

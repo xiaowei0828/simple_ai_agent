@@ -6,7 +6,7 @@
 
 - Responses API 的多轮工具调用循环，并通过 `previous_response_id` 延续交互式会话
 - 默认启用 `parallel_tool_calls`，允许模型在一轮中批量返回多个独立工具调用；Host 顺序完成参数校验和审批，纯只读批次并发执行，包含写入或命令的批次按模型顺序执行
-- SDK 负责建连和响应头阶段的重试；适配层在响应体提前终止、且尚未输出任何流式 delta 时默认额外重试一次，可通过 `OpenAIModelOptions.maxTransportRetries` 调整为 0–3 次。终态事件一旦到达便直接采用，不依赖后续 `[DONE]`；兼容接口若不提供请求幂等保证，重试仍可能在服务端产生额外响应
+- 默认创建的 SDK 客户端关闭自动重试，适配层也不会重试提前终止的响应体；请求失败会直接交给 Host。终态事件一旦到达便直接采用，不依赖后续 `[DONE]`。通过 `OpenAIModelOptions.client` 注入自定义客户端时，其重试策略由调用方负责
 - 七个基础工具：`list_directory`、`read_file`、`search_code`、`write_file`、`replace_in_file`、`delete_file`、`run_command`；发现 Skill 时额外注册 `load_skill`
 - `read_file` / `load_skill` 使用显式续读游标；工具输出超出上下文预算时优先压缩正文并保留 `nextLine` / `nextOffset` 等结构化字段
 - `search_code` 同时支持文件和目录、字面量大小写匹配、路径 glob 与上下文行；空 glob 等价于不筛选，目录发现、单文件大小、累计读取量和 12000 字符结构化结果都有硬上限，未完整扫描会返回原因
@@ -71,7 +71,7 @@ npm run dev -- --workspace .
 
 `.config/` 已被 Git 和 Agent 文件工具忽略，避免 API Key 被提交或重新送入模型上下文。`models.default` 必须出现在 `models.available` 中。`reasoningSummary` 控制是否请求并在 console 中显示模型提供的推理摘要，可选值为 `off`、`auto`、`concise` 或 `detailed`，省略时默认为 `auto`。命令行 `--model` 可覆盖默认模型，`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 可覆盖配置文件中的对应值：
 
-CLI 优先显示 API 返回的 reasoning summary。部分兼容接口（例如启用了 reasoning parser 的 vLLM）会改为返回 `reasoning_text`；此时 CLI 会显示接口明确提供的原始推理文本，HTML 运行报告也会将它标记为 `reasoning text`。这类内容可能包含完整思考过程，请注意 console 输出和 `.agent-runs/` 日志的访问范围。如果兼容接口明确拒绝 reasoning summary 参数，CLI 会提示一次，自动重试普通请求，并在当前进程内不再为该模型请求摘要。
+CLI 优先显示 API 返回的 reasoning summary。部分兼容接口（例如启用了 reasoning parser 的 vLLM）会改为返回 `reasoning_text`；此时 CLI 会显示接口明确提供的原始推理文本，HTML 运行报告也会将它标记为 `reasoning text`。这类内容可能包含完整思考过程，请注意 console 输出和 `.agent-runs/` 日志的访问范围。如果兼容接口明确拒绝 reasoning summary 参数，CLI 会提示一次，移除该参数后发起一次兼容降级请求，并在当前进程内不再为该模型请求摘要。
 
 ```bash
 export OPENAI_BASE_URL="https://provider.example.com/v1"

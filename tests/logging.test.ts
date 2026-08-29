@@ -356,62 +356,21 @@ describe("raw OpenAI logging", () => {
     expect(result).toMatchObject({ id: "resp-terminal", outputText: "complete" });
   });
 
-  it("retries a terminated response body before any streamed delta is visible", async () => {
+  it("propagates a terminated response body without retrying", async () => {
     const emitted: ModelStreamEvent[] = [];
     const traces: OpenAITraceEntry[] = [];
     let requestCount = 0;
-    const completedResponse = {
-      id: "resp-recovered",
-      object: "response",
-      created_at: 1,
-      status: "completed",
-      model: "test-model",
-      output: [{
-        id: "msg-recovered",
-        type: "message",
-        status: "completed",
-        role: "assistant",
-        content: [{ type: "output_text", text: "recovered", annotations: [], logprobs: [] }],
-      }],
-      usage: {
-        input_tokens: 1,
-        input_tokens_details: { cached_tokens: 0 },
-        output_tokens: 1,
-        output_tokens_details: { reasoning_tokens: 0 },
-        total_tokens: 2,
-      },
-    };
-    const recoveredEvents = [
-      {
-        type: "response.output_text.delta",
-        item_id: "msg-recovered",
-        output_index: 0,
-        content_index: 0,
-        delta: "recovered",
-        logprobs: [],
-        sequence_number: 1,
-      },
-      { type: "response.completed", response: completedResponse, sequence_number: 2 },
-    ];
-    const recoveredStream = `${recoveredEvents
-      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-      .join("")}data: [DONE]\n\n`;
     const client = new OpenAI({
       apiKey: "test-key",
       baseURL: "https://example.test/v1",
+      maxRetries: 0,
       fetch: async () => {
         requestCount += 1;
-        if (requestCount === 1) {
-          return new Response(new ReadableStream({
-            start(controller) {
-              controller.error(new TypeError("terminated"));
-            },
-          }), {
-            status: 200,
-            headers: { "content-type": "text/event-stream" },
-          });
-        }
-        return new Response(recoveredStream, {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.error(new TypeError("terminated"));
+          },
+        }), {
           status: 200,
           headers: { "content-type": "text/event-stream" },
         });
@@ -422,27 +381,21 @@ describe("raw OpenAI logging", () => {
       traceSink: { async log(entry) { traces.push(entry); } },
     });
 
-    const result = await model.respond({
+    await expect(model.respond({
       model: "test-model",
       instructions: "test instructions",
       input: "hello",
       stream: true,
       async onStreamEvent(event) { emitted.push(event); },
       tools: [],
-    });
+    })).rejects.toThrow("terminated");
 
-    expect(requestCount).toBe(2);
-    expect(emitted).toEqual([{ type: "output_text_delta", delta: "recovered" }]);
-    expect(result).toMatchObject({ id: "resp-recovered", outputText: "recovered" });
-    expect(traces.map((trace) => trace.type)).toEqual([
-      "openai.request",
-      "openai.error",
-      "openai.request",
-      "openai.response",
-    ]);
+    expect(requestCount).toBe(1);
+    expect(emitted).toEqual([]);
+    expect(traces.map((trace) => trace.type)).toEqual(["openai.request", "openai.error"]);
   });
 
-  it("does not retry a terminated stream after forwarding a visible delta", async () => {
+  it("forwards a visible delta before propagating stream termination", async () => {
     const emitted: ModelStreamEvent[] = [];
     let requestCount = 0;
     const encoder = new TextEncoder();
@@ -458,6 +411,7 @@ describe("raw OpenAI logging", () => {
     const client = new OpenAI({
       apiKey: "test-key",
       baseURL: "https://example.test/v1",
+      maxRetries: 0,
       fetch: async () => {
         requestCount += 1;
         let sentDelta = false;
@@ -493,37 +447,7 @@ describe("raw OpenAI logging", () => {
     expect(emitted).toEqual([{ type: "output_text_delta", delta: "partial" }]);
   });
 
-  it("stops after the configured transport retry budget", async () => {
-    let requestCount = 0;
-    const client = new OpenAI({
-      apiKey: "test-key",
-      baseURL: "https://example.test/v1",
-      fetch: async () => {
-        requestCount += 1;
-        return new Response(new ReadableStream({
-          start(controller) {
-            controller.error(new TypeError("terminated"));
-          },
-        }), {
-          status: 200,
-          headers: { "content-type": "text/event-stream" },
-        });
-      },
-    });
-    const model = new OpenAIModel({ client, maxTransportRetries: 1 });
-
-    await expect(model.respond({
-      model: "test-model",
-      instructions: "test instructions",
-      input: "hello",
-      stream: true,
-      tools: [],
-    })).rejects.toThrow("terminated");
-
-    expect(requestCount).toBe(2);
-  });
-
-  it("retries without reasoning summaries when a compatible endpoint rejects them", async () => {
+  it("falls back without reasoning summaries when a compatible endpoint rejects them", async () => {
     const transmittedBodies: Array<Record<string, unknown>> = [];
     let requestCount = 0;
     const client = new OpenAI({
