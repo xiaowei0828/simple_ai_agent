@@ -5,7 +5,11 @@
 ## 它实现了什么
 
 - Responses API 的多轮工具调用循环，并通过 `previous_response_id` 延续交互式会话
+- 默认启用 `parallel_tool_calls`，允许模型在一轮中批量返回多个独立工具调用；Host 顺序完成参数校验和审批，纯只读批次并发执行，包含写入或命令的批次按模型顺序执行
+- SDK 负责建连和响应头阶段的重试；适配层在响应体提前终止、且尚未输出任何流式 delta 时默认额外重试一次，可通过 `OpenAIModelOptions.maxTransportRetries` 调整为 0–3 次。终态事件一旦到达便直接采用，不依赖后续 `[DONE]`；兼容接口若不提供请求幂等保证，重试仍可能在服务端产生额外响应
 - 七个基础工具：`list_directory`、`read_file`、`search_code`、`write_file`、`replace_in_file`、`delete_file`、`run_command`；发现 Skill 时额外注册 `load_skill`
+- `read_file` / `load_skill` 使用显式续读游标；工具输出超出上下文预算时优先压缩正文并保留 `nextLine` / `nextOffset` 等结构化字段
+- `search_code` 同时支持文件和目录、字面量大小写匹配、路径 glob 与上下文行；空 glob 等价于不筛选，目录发现、单文件大小、累计读取量和 12000 字符结构化结果都有硬上限，未完整扫描会返回原因
 - 工作区内的新建、修改、删除文件由宿主策略自动批准；`run_command` 支持逐次审批和受信环境下的 `--yes`
 - 工作区路径限制、符号链接逃逸检查、常见密钥文件拦截
 - 测试子进程会移除名称类似 token、secret、password、API key 的环境变量
@@ -35,8 +39,8 @@ flowchart LR
 核心循环位于 `src/core/agent-runner.ts`：
 
 1. 把任务、系统指令和工具 JSON Schema 发给模型。
-2. 如果模型返回 `function_call`，解析并用 Zod 校验参数。
-3. 读操作直接执行；写操作和进程执行先交给 `ApprovalPolicy`。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
+2. 如果模型返回一个或多个 `function_call`，按顺序解析并用 Zod 校验参数。
+3. 写操作和进程执行先交给 `ApprovalPolicy`；预检完成后，纯只读批次并发执行，包含写入或命令的批次保持顺序执行。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
 4. 把结构化工具结果作为 `function_call_output` 发回模型。
 5. 模型不再调用工具时结束；超过最大轮数则强制停止。
 
@@ -67,7 +71,7 @@ npm run dev -- --workspace .
 
 `.config/` 已被 Git 和 Agent 文件工具忽略，避免 API Key 被提交或重新送入模型上下文。`models.default` 必须出现在 `models.available` 中。`reasoningSummary` 控制是否请求并在 console 中显示模型提供的推理摘要，可选值为 `off`、`auto`、`concise` 或 `detailed`，省略时默认为 `auto`。命令行 `--model` 可覆盖默认模型，`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 可覆盖配置文件中的对应值：
 
-这里只显示 API 返回的 reasoning summary，不是模型未公开的完整思维链。如果兼容接口明确拒绝 reasoning summary 参数，CLI 会提示一次，自动重试普通请求，并在当前进程内不再为该模型请求摘要。
+CLI 优先显示 API 返回的 reasoning summary。部分兼容接口（例如启用了 reasoning parser 的 vLLM）会改为返回 `reasoning_text`；此时 CLI 会显示接口明确提供的原始推理文本，HTML 运行报告也会将它标记为 `reasoning text`。这类内容可能包含完整思考过程，请注意 console 输出和 `.agent-runs/` 日志的访问范围。如果兼容接口明确拒绝 reasoning summary 参数，CLI 会提示一次，自动重试普通请求，并在当前进程内不再为该模型请求摘要。
 
 ```bash
 export OPENAI_BASE_URL="https://provider.example.com/v1"
@@ -266,16 +270,16 @@ npm run dev -- --skill-root ./examples/skills '$code-review 检查当前实现'
 启动阶段只向模型提供 Skill 名称和不超过 80 字符的 `routing`；没有 `routing` 时使用截短的 `description`。模型使用下面的调用读取 Skill 入口：
 
 ```json
-{ "name": "code-review", "resource": "SKILL.md" }
+{ "name": "code-review", "resource": "SKILL.md", "offset": null, "limit": null }
 ```
 
 如果 `SKILL.md` 引用了同一 Skill 目录下的其他文件，仍通过 `load_skill` 渐进读取：
 
 ```json
-{ "name": "code-review", "resource": "references/checklist.md" }
+{ "name": "code-review", "resource": "references/checklist.md", "offset": null, "limit": null }
 ```
 
-资源路径以对应 Skill 目录为根，不能通过绝对路径、`..` 或符号链接逃逸。机器公共目录可这样配置：
+单次最多返回 15000 字符；结果中的 `nextOffset` 非空时，用它作为下一次 `offset` 继续读取。所有 Skill 根中的名称必须全局唯一，同名不会静默覆盖。资源路径以对应 Skill 目录为根，不能通过绝对路径、`..` 或符号链接逃逸。机器公共目录可这样配置：
 
 ```bash
 export CODE_AGENT_SKILL_ROOTS="/usr/local/share/code-agent/skills"

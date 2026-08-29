@@ -62,12 +62,12 @@ describe("createConsoleEventLogger", () => {
       response: {
         id: "response-1",
         outputText: "fallback output",
-        reasoningSummary: "Fallback summary.",
+        reasoningText: "Raw reasoning text.",
         toolCalls: [],
       },
     });
 
     expect(stdout.text()).toBe("fallback output\n");
-    expect(stderr.text()).toContain("thinking> Fallback summary.\n");
+    expect(stderr.text()).toContain("thinking> Raw reasoning text.\n");
   });
 });

@@ -95,8 +95,9 @@ export function createConsoleEventLogger(
             "agent: reasoning summaries are unsupported by this model; continuing without them\n",
           );
         }
-        if (event.response.reasoningSummary && !reasoningStarted) {
-          stderr.write(`${prefixLines("thinking> ", event.response.reasoningSummary)}\n`);
+        const finalReasoning = event.response.reasoningSummary ?? event.response.reasoningText;
+        if (finalReasoning && !reasoningStarted) {
+          stderr.write(`${prefixLines("thinking> ", finalReasoning)}\n`);
         }
         if (options.stream && event.response.outputText && !outputStarted) {
           writeOutput(event.response.outputText);

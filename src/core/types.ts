@@ -30,7 +30,8 @@ export type ReasoningSummaryMode = "auto" | "concise" | "detailed";
 
 export type ModelStreamEvent =
   | { type: "output_text_delta"; delta: string }
-  | { type: "reasoning_summary_delta"; delta: string };
+  | { type: "reasoning_summary_delta"; delta: string }
+  | { type: "reasoning_text_delta"; delta: string };
 
 export type ModelStreamEventHandler = (
   event: ModelStreamEvent,
@@ -51,6 +52,7 @@ export interface ModelResponse {
   id: string;
   outputText: string;
   reasoningSummary?: string;
+  reasoningText?: string;
   reasoningSummaryUnavailable?: boolean;
   toolCalls: ModelToolCall[];
 }
@@ -77,8 +79,8 @@ export type AgentEvent =
   | { type: "model_response"; step: number; response: ModelResponse }
   | { type: "tool_requested"; step: number; call: ModelToolCall; risk?: ToolRisk }
   | { type: "approval_requested"; step: number; request: ApprovalRequest }
-  | { type: "tool_completed"; step: number; toolName: string; result: unknown }
-  | { type: "tool_failed"; step: number; toolName: string; error: string }
+  | { type: "tool_completed"; step: number; callId: string; toolName: string; result: unknown }
+  | { type: "tool_failed"; step: number; callId: string; toolName: string; error: string }
   | { type: "run_completed"; steps: number; output: string };
 
 export type AgentEventHandler = (event: AgentEvent) => void | Promise<void>;

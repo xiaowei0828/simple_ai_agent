@@ -42,6 +42,7 @@ describe("trace viewer", () => {
             {
               type: "reasoning",
               summary: [{ type: "summary_text", text: "I should read the file." }],
+              content: [{ type: "reasoning_text", text: "First inspect the source tree." }],
             },
             {
               type: "function_call",
@@ -106,12 +107,15 @@ describe("trace viewer", () => {
     expect(report.toolDefinitionVariants).toBe(1);
     expect(report.totals).toMatchObject({ toolCalls: 1, totalTokens: 255, cachedTokens: 50 });
     expect(report.turns[0]?.toolCalls[0]?.result).toMatchObject({ ok: true, returnedInTurn: 2 });
+    expect(report.turns[0]?.reasoningTexts).toEqual(["First inspect the source tree."]);
     expect(report.turns[1]?.assistantMessages).toEqual(["Found the entry point."]);
 
     const html = renderTraceReportHtml(report);
     expect(html).toContain("用户输入");
     expect(html).toContain("read_file");
     expect(html).toContain("最终回答");
+    expect(html).toContain("模型思考 / reasoning text");
+    expect(html).toContain("First inspect the source tree.");
     expect(html).toContain("折叠 1 份重复 instructions");
     expect(html).toContain("Inspect &lt;src&gt;.");
     expect(html).not.toContain("Inspect <src>.");

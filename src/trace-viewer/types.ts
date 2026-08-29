@@ -47,6 +47,7 @@ export interface TraceTurn {
   userInputs: string[];
   returnedToolResults: TraceToolResult[];
   reasoningSummaries: string[];
+  reasoningTexts: string[];
   assistantMessages: string[];
   toolCalls: TraceToolCall[];
   usage: TraceUsage;

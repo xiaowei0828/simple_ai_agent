@@ -31,6 +31,7 @@ function buildBaseInstructions(environment: RuntimeEnvironment): string {
 Rules:
 - Inspect only information relevant to the task, make the smallest useful change, and verify material results. Never claim success unless tool output confirms it.
 - Use workspace-relative paths. For an explicit path, operate directly; otherwise start with list_directory depth=1. Prefer search_code for a specific symbol or text.
+- Batch only independent tool calls. If read_file returns nextLine, continue from that line only when the omitted content is relevant.
 - Read existing files before editing. Ask the user instead of guessing a materially ambiguous create, overwrite, or delete target.
 - Prefer structured file tools. Use replace_in_file for localized edits and write_file for creation or intentional full replacement.
 - Use run_command for builds, tests, version control, and uncovered commands. Write the complete command using ${shell.displayName} syntax, and check its exit code and output.

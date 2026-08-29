@@ -155,7 +155,8 @@ function renderTurn(turn: TraceTurn): string {
       ${renderConfigChanges(turn.configChanges)}
       ${turn.userInputs.map(renderUserInput).join("\n")}
       ${resultCount > 0 ? `<div class="continuation"><span>↳</span> 收到上一轮 ${formatNumber(resultCount)} 个工具结果后继续推理</div>` : ""}
-      ${turn.reasoningSummaries.map(renderReasoning).join("\n")}
+      ${turn.reasoningSummaries.map((reasoning) => renderReasoning(reasoning, "summary")).join("\n")}
+      ${turn.reasoningTexts.map((reasoning) => renderReasoning(reasoning, "text")).join("\n")}
       ${turn.assistantMessages.map((message) => renderAssistantMessage(message, isFinal)).join("\n")}
       ${turn.toolCalls.length > 0 ? `<div class="tool-call-list">${turn.toolCalls.map(renderToolCall).join("\n")}</div>` : ""}
       ${turn.error ? renderError(turn.error) : ""}
@@ -177,9 +178,12 @@ function renderUserInput(input: string): string {
   </section>`;
 }
 
-function renderReasoning(reasoning: string): string {
+function renderReasoning(reasoning: string, kind: "summary" | "text"): string {
+  const label = kind === "summary"
+    ? "模型计划 / reasoning summary"
+    : "模型思考 / reasoning text";
   return `<details class="event reasoning-event">
-    <summary><span class="event-label"><span class="event-dot reasoning-dot"></span>模型计划 / reasoning summary</span></summary>
+    <summary><span class="event-label"><span class="event-dot reasoning-dot"></span>${label}</span></summary>
     <div class="message-text">${escapeHtml(reasoning)}</div>
   </details>`;
 }

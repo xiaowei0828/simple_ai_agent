@@ -1,7 +1,11 @@
-import { readdir, stat } from "node:fs/promises";
+import { opendir, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { resolveExistingWorkspacePath, toWorkspaceRelative } from "../policy/path-policy.js";
+import {
+  assertSafeRelativePath,
+  resolveExistingWorkspacePath,
+  toWorkspaceRelative,
+} from "../policy/path-policy.js";
 import { IGNORED_DIRECTORIES } from "./files.js";
 import type { AgentTool } from "./types.js";
 
@@ -20,6 +24,7 @@ interface ListedEntry {
 export function createListDirectoryTool(): AgentTool<z.infer<typeof inputSchema>> {
   return {
     risk: "read",
+    executionMode: "parallel",
     definition: {
       type: "function",
       name: "list_directory",
@@ -59,19 +64,29 @@ export function createListDirectoryTool(): AgentTool<z.infer<typeof inputSchema>
 
       const entries: ListedEntry[] = [];
       let truncated = false;
+      let scannedEntries = 0;
+      const maxScannedEntries = Math.max(1_000, input.maxResults * 10);
 
       async function visit(currentDirectory: string, level: number): Promise<void> {
         if (truncated) return;
-        const children = (await readdir(currentDirectory, { withFileTypes: true }))
-          .filter((entry) => !shouldIgnoreEntry(entry.name, entry.isDirectory()))
-          .map((entry) => ({
+        const children: Array<{ name: string; type: DirectoryEntryType }> = [];
+        const handle = await opendir(currentDirectory);
+        for await (const entry of handle) {
+          if (scannedEntries >= maxScannedEntries) {
+            truncated = true;
+            break;
+          }
+          scannedEntries += 1;
+          if (shouldIgnoreEntry(entry.name, entry.isDirectory())) continue;
+          children.push({
             name: entry.name,
             type: entryType(entry),
-          }))
-          .sort((left, right) => {
-            const typeOrder = entryOrder(left.type) - entryOrder(right.type);
-            return typeOrder || left.name.localeCompare(right.name);
           });
+        }
+        children.sort((left, right) => {
+          const typeOrder = entryOrder(left.type) - entryOrder(right.type);
+          return typeOrder || left.name.localeCompare(right.name);
+        });
 
         for (const child of children) {
           if (entries.length >= input.maxResults) {
@@ -106,8 +121,15 @@ export function createListDirectoryTool(): AgentTool<z.infer<typeof inputSchema>
 }
 
 function shouldIgnoreEntry(name: string, isDirectory: boolean): boolean {
-  if (name.startsWith(".env") || name === ".DS_Store") return true;
-  return isDirectory && IGNORED_DIRECTORIES.has(name);
+  const normalizedName = name.toLowerCase();
+  if (normalizedName.startsWith(".env") || normalizedName === ".ds_store") return true;
+  if (isDirectory && IGNORED_DIRECTORIES.has(normalizedName)) return true;
+  try {
+    assertSafeRelativePath(name);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 function entryType(entry: {

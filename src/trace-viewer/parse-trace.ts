@@ -60,6 +60,7 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
       userInputs: [],
       returnedToolResults: [],
       reasoningSummaries: [],
+      reasoningTexts: [],
       assistantMessages: [],
       toolCalls: [],
       usage: { ...EMPTY_USAGE },
@@ -141,6 +142,7 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
       turn.status = asString(body.status);
       turn.httpStatus = asNumber(asObject(entry.value.http)?.status);
       turn.reasoningSummaries = extractReasoningSummaries(body.output);
+      turn.reasoningTexts = extractReasoningTexts(body.output);
       turn.assistantMessages = extractAssistantMessages(body.output, body.output_text);
       turn.toolCalls = extractToolCalls(body.output);
       turn.usage = extractUsage(body.usage);
@@ -280,6 +282,22 @@ function extractReasoningSummaries(output: unknown): string[] {
     }
   }
   return summaries;
+}
+
+function extractReasoningTexts(output: unknown): string[] {
+  if (!Array.isArray(output)) return [];
+  const reasoningTexts: string[] = [];
+  for (const item of output) {
+    const object = asObject(item);
+    if (!object || object.type !== "reasoning" || !Array.isArray(object.content)) continue;
+    for (const content of object.content) {
+      const contentObject = asObject(content);
+      if (contentObject?.type !== "reasoning_text") continue;
+      const text = asString(contentObject.text);
+      if (text) reasoningTexts.push(text);
+    }
+  }
+  return reasoningTexts;
 }
 
 function extractAssistantMessages(output: unknown, outputText: unknown): string[] {

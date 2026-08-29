@@ -8,3 +8,4 @@ dist/
 coverage/
 temp/
 .DS_Store
+/start_simple_agent.cmd

@@ -8,9 +8,11 @@ import type {
   ModelAdapter,
   ModelRequest,
   ModelResponse,
+  ToolCallOutput,
 } from "../src/core/types.js";
 import { AllowAllApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
+import { ToolRegistry } from "../src/tools/types.js";
 
 class ScriptedModel implements ModelAdapter {
   readonly requests: ModelRequest[] = [];
@@ -32,6 +34,15 @@ async function fixture(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-"));
   await writeFile(path.join(root, "hello.ts"), "export const answer = 42;\n", "utf8");
   return root;
+}
+
+function functionCallOutputs(request: ModelRequest | undefined): ToolCallOutput[] {
+  if (!request || !Array.isArray(request.input)) {
+    throw new Error("Expected the next model request to contain tool outputs.");
+  }
+  return request.input.filter((item): item is ToolCallOutput => (
+    "type" in item && item.type === "function_call_output"
+  ));
 }
 
 describe("AgentRunner", () => {
@@ -81,7 +92,7 @@ describe("AgentRunner", () => {
       async respond(request) {
         expect(request.stream).toBe(true);
         await request.onStreamEvent?.({
-          type: "reasoning_summary_delta",
+          type: "reasoning_text_delta",
           delta: "Inspect the project.",
         });
         await request.onStreamEvent?.({ type: "output_text_delta", delta: "Done." });
@@ -213,6 +224,191 @@ describe("AgentRunner", () => {
     expect(model.requests[1]?.previousResponseId).toBe("response-1");
     expect(JSON.stringify(model.requests[1]?.input)).toContain("answer = 42");
     expect(model.requests[1]?.instructions).toBe("test instructions");
+    const [toolOutput] = functionCallOutputs(model.requests[1]);
+    const parsedOutput = JSON.parse(toolOutput?.output ?? "") as Record<string, unknown>;
+    expect(parsedOutput.ok).toBe(true);
+    expect(parsedOutput).not.toHaveProperty("truncated");
+  });
+
+  it("returns every tool output from a parallel batch in model order", async () => {
+    const root = await fixture();
+    const model = new ScriptedModel([
+      {
+        id: "response-1",
+        outputText: "",
+        toolCalls: [
+          {
+            callId: "call-read",
+            name: "read_file",
+            arguments: JSON.stringify({ path: "hello.ts", lineStart: null, lineEnd: null }),
+          },
+          {
+            callId: "call-list",
+            name: "list_directory",
+            arguments: JSON.stringify({ path: ".", depth: 1, maxResults: 10 }),
+          },
+        ],
+      },
+      { id: "response-2", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model,
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+    });
+
+    await runner.run("Inspect the workspace.");
+
+    expect(model.requests[1]?.input).toEqual([
+      expect.objectContaining({ type: "function_call_output", call_id: "call-read" }),
+      expect.objectContaining({ type: "function_call_output", call_id: "call-list" }),
+    ]);
+  });
+
+  it("keeps truncated success and error outputs within the limit as valid JSON", async () => {
+    const root = await fixture();
+    const tools = new ToolRegistry([{
+      definition: {
+        type: "function",
+        name: "large_output",
+        description: "Return or throw a large test payload.",
+        parameters: { type: "object" },
+        strict: true,
+      },
+      risk: "read",
+      parse(input: unknown) {
+        return input as { fail: boolean };
+      },
+      async execute(input: { fail: boolean }) {
+        const content = `BEGIN-${"x".repeat(2_000)}-END`;
+        if (input.fail) throw new Error(content);
+        return { content };
+      },
+    }]);
+    const model = new ScriptedModel([
+      {
+        id: "response-1",
+        outputText: "",
+        toolCalls: [
+          {
+            callId: "call-success",
+            name: "large_output",
+            arguments: JSON.stringify({ fail: false }),
+          },
+          {
+            callId: "call-error",
+            name: "large_output",
+            arguments: JSON.stringify({ fail: true }),
+          },
+        ],
+      },
+      { id: "response-2", outputText: "Done.", toolCalls: [] },
+    ]);
+    const maxToolOutputChars = 400;
+    const runner = new AgentRunner({
+      model,
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools,
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      maxToolOutputChars,
+    });
+
+    await runner.run("Produce large outputs.");
+
+    const [successOutput, errorOutput] = functionCallOutputs(model.requests[1]);
+    expect(successOutput?.output.length).toBeLessThanOrEqual(maxToolOutputChars);
+    expect(errorOutput?.output.length).toBeLessThanOrEqual(maxToolOutputChars);
+
+    const success = JSON.parse(successOutput?.output ?? "") as Record<string, unknown>;
+    expect(success).toMatchObject({
+      ok: true,
+      truncated: true,
+      originalOutputChars: expect.any(Number),
+      truncation: {
+        strategy: "structured",
+        truncatedStrings: 1,
+        omittedStringChars: expect.any(Number),
+      },
+    });
+    const successResult = success.result as { content: string };
+    expect(successResult.content).toEqual(expect.stringMatching(/^BEGIN-/));
+    expect(successResult.content).toEqual(expect.stringMatching(/-END$/));
+
+    const failure = JSON.parse(errorOutput?.output ?? "") as Record<string, unknown>;
+    expect(failure).toMatchObject({
+      ok: false,
+      truncated: true,
+      originalOutputChars: expect.any(Number),
+      omittedErrorChars: expect.any(Number),
+    });
+    expect(failure.error).toEqual(expect.stringMatching(/^BEGIN-/));
+    expect(failure.error).toEqual(expect.stringMatching(/-END$/));
+  });
+
+  it("preserves read_file continuation metadata when the runner trims its content", async () => {
+    const root = await fixture();
+    await writeFile(
+      path.join(root, "many-lines.txt"),
+      Array.from({ length: 600 }, (_, index) => `line ${index + 1}`).join("\n"),
+      "utf8",
+    );
+    const model = new ScriptedModel([
+      {
+        id: "response-1",
+        outputText: "",
+        toolCalls: [{
+          callId: "call-read",
+          name: "read_file",
+          arguments: JSON.stringify({
+            path: "many-lines.txt",
+            lineStart: null,
+            lineEnd: null,
+          }),
+        }],
+      },
+      { id: "response-2", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model,
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      maxToolOutputChars: 600,
+    });
+
+    await runner.run("Read the file.");
+
+    const [toolOutput] = functionCallOutputs(model.requests[1]);
+    const parsed = JSON.parse(toolOutput?.output ?? "") as {
+      truncated: boolean;
+      result: { content: string; nextLine: number; truncatedBy: string };
+    };
+    expect(toolOutput?.output.length).toBeLessThanOrEqual(600);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.result.content).toContain("…[truncated]…");
+    expect(parsed.result.nextLine).toBe(501);
+    expect(parsed.result.truncatedBy).toBe("line_limit");
+  });
+
+  it("rejects a tool output budget too small for a structured truncation envelope", async () => {
+    const root = await fixture();
+
+    expect(() => new AgentRunner({
+      model: new ScriptedModel([]),
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      maxToolOutputChars: 127,
+    })).toThrow("at least 128");
   });
 
   it("returns an approval denial to the model without editing the file", async () => {

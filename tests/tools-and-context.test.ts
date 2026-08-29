@@ -6,12 +6,18 @@ import { buildAgentInstructions } from "../src/context/build-instructions.js";
 import { loadProjectInstructions } from "../src/context/instruction-loader.js";
 import { discoverMarkdownDocuments } from "../src/context/document-catalog.js";
 import { discoverSkills, formatSkillCatalog } from "../src/context/skill-registry.js";
-import { resolveExistingWorkspacePath } from "../src/policy/path-policy.js";
+import {
+  assertSafeRelativePath,
+  resolveExistingWorkspacePath,
+  resolveWorkspacePathForMutation,
+} from "../src/policy/path-policy.js";
 import { createDeleteFileTool } from "../src/tools/delete-file.js";
+import { walkFilesWithMetadata } from "../src/tools/files.js";
 import { createListDirectoryTool } from "../src/tools/list-directory.js";
 import { createLoadSkillTool } from "../src/tools/load-skill.js";
 import { createReadFileTool } from "../src/tools/read-file.js";
 import { createReplaceInFileTool } from "../src/tools/replace-in-file.js";
+import { createSearchCodeTool } from "../src/tools/search-code.js";
 import { createWriteFileTool } from "../src/tools/write-file.js";
 
 describe("workspace path policy", () => {
@@ -29,6 +35,17 @@ describe("workspace path policy", () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-secret-"));
     await writeFile(path.join(root, ".env"), "TOKEN=secret", "utf8");
     await expect(resolveExistingWorkspacePath(root, ".env")).rejects.toThrow("sensitive");
+  });
+
+  it("blocks sensitive names in every path segment", () => {
+    expect(() => assertSafeRelativePath(".")).not.toThrow();
+    expect(() => assertSafeRelativePath(".env/generated/config.txt")).toThrow("sensitive");
+    expect(() => assertSafeRelativePath("certificates/private.pem/metadata.txt")).toThrow("sensitive");
+    if (process.platform === "win32") {
+      expect(() => assertSafeRelativePath("credentials.json:stream")).toThrow("Windows");
+      expect(() => assertSafeRelativePath(".git./config")).toThrow("Windows");
+      expect(() => assertSafeRelativePath("NUL.txt")).toThrow("Windows");
+    }
   });
 
   it("blocks agent trace logs from being read back into model context", async () => {
@@ -49,6 +66,43 @@ describe("workspace path policy", () => {
     await writeFile(path.join(root, ".config", "config.json"), "{}\n", "utf8");
 
     await expect(resolveExistingWorkspacePath(root, ".config/config.json")).rejects.toThrow("blocked");
+  });
+
+  it("matches blocked path segments case-insensitively", () => {
+    expect(() => assertSafeRelativePath(".GIT/config")).toThrow("blocked");
+    expect(() => assertSafeRelativePath("packages/NODE_MODULES/package.json")).toThrow("blocked");
+    expect(() => assertSafeRelativePath(".Agent-Runs/run.jsonl")).toThrow("blocked");
+  });
+
+  it("rechecks protected paths after resolving symbolic links", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-canonical-policy-"));
+    const protectedDirectory = path.join(root, ".config");
+    const sensitiveDirectory = path.join(root, ".env");
+    await mkdir(protectedDirectory);
+    await mkdir(sensitiveDirectory);
+    await mkdir(path.join(sensitiveDirectory, "generated"));
+    await writeFile(path.join(protectedDirectory, "config.json"), "{}\n", "utf8");
+    await symlink(
+      protectedDirectory,
+      path.join(root, "config-alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    await symlink(
+      sensitiveDirectory,
+      path.join(root, "settings-link"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(resolveExistingWorkspacePath(root, "config-alias/config.json"))
+      .rejects.toThrow("blocked");
+    await expect(resolveExistingWorkspacePath(root, "settings-link"))
+      .rejects.toThrow("sensitive");
+    await expect(resolveExistingWorkspacePath(root, "settings-link/generated"))
+      .rejects.toThrow("sensitive");
+    await expect(resolveWorkspacePathForMutation(root, "config-alias/new.json"))
+      .rejects.toThrow("blocked");
+    await expect(resolveWorkspacePathForMutation(root, "settings-link/new.json"))
+      .rejects.toThrow("sensitive");
   });
 });
 
@@ -74,6 +128,300 @@ describe("replace_in_file", () => {
       expectedOccurrences: 1,
     }, { workspaceRoot: root });
     expect(await readFile(filePath, "utf8")).toContain("value = 2");
+  });
+});
+
+describe("workspace file discovery", () => {
+  it("stops streaming a large directory at the explicit entry budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-walk-budget-"));
+    await Promise.all(Array.from({ length: 10 }, (_, index) => (
+      writeFile(path.join(root, `file-${index}.txt`), "value", "utf8")
+    )));
+
+    const result = await walkFilesWithMetadata(root, {
+      maxFiles: 10,
+      maxDirectories: 10,
+      maxEntries: 3,
+    });
+
+    expect(result).toMatchObject({
+      entriesScanned: 3,
+      limitReached: "entry_limit",
+      truncated: true,
+    });
+    expect(result.files.length).toBeLessThanOrEqual(3);
+  });
+
+  it("applies a discovery filter before consuming the file budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-walk-filter-"));
+    await writeFile(path.join(root, "a.log"), "ignore", "utf8");
+    await writeFile(path.join(root, "b.log"), "ignore", "utf8");
+    await writeFile(path.join(root, "target.ts"), "include", "utf8");
+
+    const result = await walkFilesWithMetadata(root, {
+      maxFiles: 1,
+      maxDirectories: 1,
+      maxEntries: 10,
+      includeFile: (file) => file.endsWith(".ts"),
+    });
+
+    expect(result.files.map((file) => path.basename(file))).toEqual(["target.ts"]);
+    expect(result.filteredFiles).toBe(2);
+    expect(result.limitReached).toBeNull();
+  });
+});
+
+describe("search_code", () => {
+  it("searches an explicitly named file, including one without a known text extension", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-file-"));
+    await writeFile(path.join(root, "build.rules"), "first\nOPENSSL_RAND_WINDOWS\nlast\n", "utf8");
+    const tool = createSearchCodeTool();
+    const input = tool.parse({
+      path: "build.rules",
+      query: "OPENSSL_RAND_",
+      maxResults: 10,
+    });
+
+    await expect(tool.execute(input, { workspaceRoot: root })).resolves.toEqual({
+      matches: [{
+        path: "build.rules",
+        line: 2,
+        column: 1,
+        text: "OPENSSL_RAND_WINDOWS",
+      }],
+      truncated: false,
+      scan: {
+        filesDiscovered: 1,
+        filesSearched: 1,
+        directoriesScanned: 0,
+        entriesScanned: 0,
+        bytesRead: 32,
+        unreadableDirectories: 0,
+        ignoredPaths: 0,
+        skippedByGlob: 0,
+        skippedByPathPolicy: 0,
+        skippedBySize: 0,
+        skippedBinaryFiles: 0,
+        unreadableFiles: 0,
+        matchesFound: 1,
+        incomplete: false,
+        reasons: [],
+      },
+    });
+  });
+
+  it("searches UTF-8 files under a directory without an extension allowlist", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-directory-"));
+    await writeFile(path.join(root, "sources.cmake"), "target_link_libraries(foo)\n", "utf8");
+    await writeFile(path.join(root, "CMakeLists.txt"), "target_link_libraries(bar)\n", "utf8");
+    await writeFile(path.join(root, "schema.proto"), "target_link_libraries(proto)\n", "utf8");
+    await writeFile(path.join(root, "build.gradle"), "target_link_libraries(gradle)\n", "utf8");
+    await writeFile(path.join(root, "run"), "target_link_libraries(script)\n", "utf8");
+    const tool = createSearchCodeTool();
+
+    const result = await tool.execute({
+      path: ".",
+      query: "target_link_libraries",
+      maxResults: 10,
+    }, { workspaceRoot: root });
+
+    expect(result).toMatchObject({ truncated: false });
+    expect((result as { matches: unknown[] }).matches).toHaveLength(5);
+    expect(result).toMatchObject({
+      scan: {
+        filesDiscovered: 5,
+        filesSearched: 5,
+        incomplete: false,
+      },
+    });
+  });
+
+  it("supports case folding, path globs, and nearby context", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-options-"));
+    await mkdir(path.join(root, "src"));
+    await writeFile(
+      path.join(root, "src", "main.ts"),
+      "before\nconst VALUE = 42;\nafter\n",
+      "utf8",
+    );
+    await writeFile(path.join(root, "notes.md"), "const VALUE = 7;\n", "utf8");
+    const tool = createSearchCodeTool();
+
+    const result = await tool.execute({
+      path: ".",
+      query: "const value = 42;",
+      maxResults: 10,
+      ignoreCase: true,
+      glob: "src/**/*.ts",
+      context: 1,
+    }, { workspaceRoot: root });
+
+    expect(result).toMatchObject({
+      matches: [{
+        path: "src/main.ts",
+        line: 2,
+        text: "const VALUE = 42;",
+        before: [{ line: 1, text: "before" }],
+        after: [{ line: 3, text: "after" }],
+      }],
+      truncated: false,
+      scan: {
+        filesDiscovered: 2,
+        filesSearched: 1,
+        skippedByGlob: 1,
+        incomplete: false,
+      },
+    });
+  });
+
+  it("treats empty and whitespace-only globs as no path filter", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-empty-glob-"));
+    await writeFile(path.join(root, "first.ts"), "shared marker\n", "utf8");
+    await writeFile(path.join(root, "second.md"), "shared marker\n", "utf8");
+    const tool = createSearchCodeTool();
+    const parsed = tool.parse({
+      path: ".",
+      query: "shared marker",
+      maxResults: 10,
+      ignoreCase: null,
+      glob: "",
+      context: null,
+    });
+
+    expect(parsed).toMatchObject({ glob: null });
+    const emptyResult = await tool.execute(parsed, { workspaceRoot: root }) as {
+      matches: Array<{ path: string }>;
+    };
+    const whitespaceResult = await tool.execute({
+      path: ".",
+      query: "shared marker",
+      maxResults: 10,
+      glob: "   ",
+    }, { workspaceRoot: root }) as { matches: Array<{ path: string }> };
+
+    expect(emptyResult.matches.map((match) => match.path).sort()).toEqual([
+      "first.ts",
+      "second.md",
+    ]);
+    expect(whitespaceResult.matches).toHaveLength(2);
+  });
+
+  it("stops at the structured search-result output budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-output-budget-"));
+    const noisyLine = `${"\\\"".repeat(80)} NEEDLE ${"value".repeat(30)}`;
+    await writeFile(
+      path.join(root, "many-matches.txt"),
+      Array.from({ length: 80 }, () => noisyLine).join("\n"),
+      "utf8",
+    );
+    const tool = createSearchCodeTool();
+
+    const result = await tool.execute({
+      path: "many-matches.txt",
+      query: "NEEDLE",
+      maxResults: 200,
+      context: 5,
+    }, { workspaceRoot: root }) as {
+      matches: unknown[];
+      truncated: boolean;
+      scan: { incomplete: boolean; reasons: string[]; matchesFound: number };
+    };
+
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(12_000);
+    expect(result.matches.length).toBeGreaterThan(0);
+    expect(result.matches.length).toBeLessThan(80);
+    expect(result.truncated).toBe(true);
+    expect(result.scan.incomplete).toBe(true);
+    expect(result.scan.reasons).toContain("output_budget_reached");
+    expect(result.scan.matchesFound).toBeGreaterThan(result.matches.length);
+  });
+
+  it("treats globstar as a complete path segment and ? as one Unicode character", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-glob-"));
+    await mkdir(path.join(root, "src", "deep"), { recursive: true });
+    await writeFile(path.join(root, "src", "ab.ts"), "embedded marker\n", "utf8");
+    await writeFile(path.join(root, "src", "😀.ts"), "unicode marker\n", "utf8");
+    await writeFile(path.join(root, "src", "deep", "nested.ts"), "nested marker\n", "utf8");
+    const tool = createSearchCodeTool();
+
+    const embeddedGlobstar = await tool.execute({
+      path: ".",
+      query: "embedded marker",
+      maxResults: 10,
+      glob: "src/a**/b.ts",
+    }, { workspaceRoot: root }) as { matches: unknown[] };
+    const segmentGlobstar = await tool.execute({
+      path: ".",
+      query: "nested marker",
+      maxResults: 10,
+      glob: "src/**.ts",
+    }, { workspaceRoot: root }) as { matches: unknown[] };
+    const unicodeQuestionMark = await tool.execute({
+      path: ".",
+      query: "unicode marker",
+      maxResults: 10,
+      glob: "src/?.ts",
+    }, { workspaceRoot: root }) as { matches: Array<{ path: string }> };
+
+    expect(embeddedGlobstar.matches).toEqual([]);
+    expect(segmentGlobstar.matches).toEqual([]);
+    expect(unicodeQuestionMark.matches).toEqual([{ path: "src/😀.ts", line: 1, column: 1, text: "unicode marker" }]);
+  });
+
+  it("reapplies path policy to every directory-search candidate", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-policy-"));
+    await writeFile(path.join(root, "safe.json"), "{\"marker\":\"do-not-return\"}\n", "utf8");
+    await writeFile(path.join(root, "credentials.json"), "{\"marker\":\"do-not-return\"}\n", "utf8");
+    const tool = createSearchCodeTool();
+
+    const result = await tool.execute({
+      path: ".",
+      query: "do-not-return",
+      maxResults: 10,
+    }, { workspaceRoot: root });
+
+    expect(result).toMatchObject({
+      matches: [{ path: "safe.json" }],
+      truncated: false,
+      scan: {
+        filesDiscovered: 2,
+        filesSearched: 1,
+        skippedByPathPolicy: 1,
+        incomplete: true,
+        reasons: ["path_policy"],
+      },
+    });
+  });
+
+  it("rejects an explicitly selected binary file", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-validation-"));
+    await writeFile(path.join(root, "binary.dat"), Buffer.from([0, 65, 66, 67]));
+    const tool = createSearchCodeTool();
+
+    await expect(tool.execute({
+      path: "binary.dat",
+      query: "ABC",
+      maxResults: 10,
+    }, { workspaceRoot: root })).rejects.toThrow("Binary");
+  });
+
+  it("returns the match column and keeps a distant match visible on a long line", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-search-column-"));
+    await writeFile(path.join(root, "long.txt"), `${"x".repeat(700)}NEEDLE${"y".repeat(300)}`, "utf8");
+    const tool = createSearchCodeTool();
+
+    const result = await tool.execute({
+      path: "long.txt",
+      query: "NEEDLE",
+      maxResults: 10,
+    }, { workspaceRoot: root }) as { matches: Array<{ column: number; text: string; lineTruncated?: boolean }> };
+
+    expect(result.matches[0]).toMatchObject({
+      column: 701,
+      lineTruncated: true,
+    });
+    expect(result.matches[0]?.text).toContain("NEEDLE");
+    expect(result.matches[0]?.text.length).toBeLessThanOrEqual(500);
   });
 });
 
@@ -202,6 +550,7 @@ describe("list_directory", () => {
     await writeFile(path.join(root, "README.md"), "# Example", "utf8");
     await writeFile(path.join(root, "src", "index.ts"), "export {};", "utf8");
     await writeFile(path.join(root, ".env"), "SECRET=value", "utf8");
+    await writeFile(path.join(root, "credentials.json"), "{}", "utf8");
 
     const tool = createListDirectoryTool();
     const result = await tool.execute(
