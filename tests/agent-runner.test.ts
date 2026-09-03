@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentLimitError, AgentRunner } from "../src/core/agent-runner.js";
+import { contextTokens, responseInputItems } from "../src/core/context-compaction.js";
 import type {
   AgentEvent,
   ModelAdapter,
+  ModelInputItem,
   ModelRequest,
   ModelResponse,
   ToolCallOutput,
@@ -46,6 +48,47 @@ function functionCallOutputs(request: ModelRequest | undefined): ToolCallOutput[
 }
 
 describe("AgentRunner", () => {
+  it.each([
+    { usage: { total_tokens: 7_000 }, contextWindow: 10_000, measured: 7_000 },
+    { usage: { input_tokens: 6_000, output_tokens: 1_000 }, contextWindow: 10_000, measured: 7_000 },
+    { usage: undefined, contextWindow: 10_000, measured: 0 },
+    { usage: undefined, contextWindow: undefined, measured: 0 },
+  ])("reports active context using usage or local estimates (case %#)", async ({ usage, contextWindow, measured }) => {
+    const response: ModelResponse = { id: "next", outputText: "Done.", toolCalls: [], usage };
+    const model = new ScriptedModel([response]);
+    const events: AgentEvent[] = [];
+    const history: ModelInputItem[] = [
+      { role: "user", content: "Earlier request." },
+      { role: "assistant", content: "Earlier progress." },
+    ];
+    const summary = "Previous checkpoint.";
+    const instructions = "test instructions";
+    const tools = createDefaultToolRegistry();
+    const runner = new AgentRunner({
+      model, modelName: "default-model", instructions, tools,
+      toolContext: { workspaceRoot: process.cwd() }, approvalPolicy: new DenyAllApprovalPolicy(),
+      contextWindow: (name) => name === "selected-model" ? contextWindow : 20_000,
+      onEvent(event) { events.push(event); },
+    });
+
+    await runner.run("Continue.", { model: "selected-model", history, summary });
+
+    const local = contextTokens([
+      ...history, { role: "user", content: "Continue." }, ...responseInputItems(response),
+    ], summary, instructions, tools.definitions());
+    expect(events.find((event) => event.type === "model_response")).toMatchObject({
+      step: 1, response,
+      context: { tokens: Math.max(local, measured) },
+    });
+    const status = events.find((event) => event.type === "model_response")?.context;
+    if (contextWindow === undefined) {
+      expect(status).not.toHaveProperty("contextWindow");
+      expect(status).not.toHaveProperty("triggerTokens");
+    } else {
+      expect(status).toMatchObject({ contextWindow: 10_000, triggerTokens: 8_000 });
+    }
+  });
+
   it("allows one run to override the configured model", async () => {
     const root = await fixture();
     const model = new ScriptedModel([

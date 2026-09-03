@@ -76,6 +76,13 @@ export interface ContextUsage {
   historyLength: number;
 }
 
+/** Estimated active context after a model response, before executing its tools. */
+export interface ContextStatus {
+  tokens: number;
+  contextWindow?: number;
+  triggerTokens?: number;
+}
+
 export interface CompactionSettings {
   contextWindow: number;
   triggerTokens: number;
@@ -110,7 +117,7 @@ export type AgentEvent =
   | { type: "model_output_delta"; step: number; delta: string }
   | { type: "model_reasoning_delta"; step: number; delta: string }
   | { type: "model_response_failed"; step: number }
-  | { type: "model_response"; step: number; response: ModelResponse }
+  | { type: "model_response"; step: number; response: ModelResponse; context?: ContextStatus }
   | { type: "tool_requested"; step: number; call: ModelToolCall; risk?: ToolRisk }
   | { type: "approval_requested"; step: number; request: ApprovalRequest }
   | { type: "tool_completed"; step: number; callId: string; toolName: string; result: unknown }

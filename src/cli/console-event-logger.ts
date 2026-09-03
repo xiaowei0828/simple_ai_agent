@@ -1,5 +1,5 @@
 import process from "node:process";
-import type { AgentEvent, AgentEventHandler } from "../core/types.js";
+import type { AgentEvent, AgentEventHandler, ContextStatus } from "../core/types.js";
 
 interface TextOutput {
   write(value: string): unknown;
@@ -98,7 +98,8 @@ export function createConsoleEventLogger(
         closeReasoning();
         closeOutput();
         stderr.write(
-          `agent: model turn ${event.step}, ${event.response.toolCalls.length} tool call(s)\n`,
+          `agent: model turn ${event.step}, ${event.response.toolCalls.length} tool call(s)`
+          + `${event.context ? `, ${formatContextStatus(event.context)}` : ""}\n`,
         );
         if (event.response.reasoningSummaryUnavailable) {
           stderr.write(
@@ -130,6 +131,17 @@ export function createConsoleEventLogger(
         break;
     }
   };
+}
+
+function formatContextStatus(context: ContextStatus): string {
+  const tokens = context.tokens.toLocaleString("en-US");
+  if (context.contextWindow === undefined) {
+    return `context ~${tokens} tokens (window unknown; auto-compaction disabled)`;
+  }
+  const percentage = (context.tokens / context.contextWindow * 100).toFixed(1);
+  const threshold = context.triggerTokens === undefined
+    ? "" : `, compact at ${context.triggerTokens.toLocaleString("en-US")}`;
+  return `context ~${tokens}/${context.contextWindow.toLocaleString("en-US")} tokens (${percentage}%)${threshold}`;
 }
 
 function prefixLines(prefix: string, value: string): string {

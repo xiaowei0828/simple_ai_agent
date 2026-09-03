@@ -110,6 +110,15 @@ describe("compacted sessions", () => {
     expect(executions).toBe(2);
     expect(approvals).toBe(2);
     expect(events.filter((event) => event.type === "compaction_completed")).toHaveLength(1);
+    const responseEvents = events.filter((event) => event.type === "model_response");
+    expect(responseEvents).toHaveLength(3);
+    for (const event of responseEvents) {
+      expect(event.context).toMatchObject({ contextWindow, triggerTokens: 3_200 });
+    }
+    if (when === "after tools") expect(responseEvents[0]?.context?.tokens).toBe(3_500);
+    // The pre-compaction usage baseline must not leak into the new context's status.
+    expect(responseEvents[1]!.context!.tokens).toBeLessThan(3_200);
+    expect(responseEvents[2]!.context!.tokens).toBeGreaterThan(responseEvents[1]!.context!.tokens);
     expect(requests.filter((request) => request.purpose === "compaction")).toHaveLength(1);
     expect(requests.at(-1)?.previousResponseId).toBe("normal-2");
     expect(requests.at(-1)?.input).toEqual([{ type: "function_call_output", call_id: "call-2", output: expect.any(String) }]);

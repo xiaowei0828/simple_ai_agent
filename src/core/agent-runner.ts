@@ -335,7 +335,13 @@ export class AgentRunner {
       previousResponseId = response.id;
       history.push(...responseInputItems(response));
       usage = responseContextUsage(response, history.length) ?? usage;
-      await this.#emit({ type: "model_response", step, response });
+      await this.#emit({
+        type: "model_response", step, response,
+        context: {
+          tokens: this.#contextTokens(history, summary, usage),
+          ...(settings ? { contextWindow: settings.contextWindow, triggerTokens: settings.triggerTokens } : {}),
+        },
+      });
 
       if (response.toolCalls.length === 0) {
         const output = response.outputText.trim();
