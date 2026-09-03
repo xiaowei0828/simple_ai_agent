@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
+import { commandEnvironment } from "./command-environment.js";
 
 export interface RunProcessOptions {
   command: string;
@@ -30,24 +31,16 @@ export interface RuntimeShell {
 const DEFAULT_MAX_OUTPUT_CHARS = 30_000;
 const FORCE_KILL_GRACE_MS = 2_000;
 
-export function sanitizedEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const secretName = /(?:api[_-]?key|token|secret|password|credential|cookie|authorization)/i;
-  return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => !secretName.test(name)),
-  );
-}
-
 export async function runProcess(options: RunProcessOptions): Promise<RunProcessResult> {
   const startedAt = Date.now();
   const output = new BoundedOutput(options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS);
   const detached = process.platform !== "win32";
-  const environment = sanitizedEnvironment();
-  const invocation = shellInvocation(options.command, process.platform, environment);
+  const invocation = shellInvocation(options.command);
   const child = spawn(invocation.program, invocation.args, {
     cwd: options.cwd,
     shell: false,
     detached,
-    env: environment,
+    env: commandEnvironment(),
     stdio: ["ignore", "pipe", "pipe"],
   });
 

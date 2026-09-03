@@ -1,8 +1,8 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AutoApproveWorkspaceFileOperationsPolicy,
   CallbackApprovalPolicy,
@@ -19,13 +19,11 @@ describe("approval policy", () => {
     });
     const policy = new AutoApproveWorkspaceFileOperationsPolicy(fallback);
 
-    for (const toolName of ["write_file", "replace_in_file", "delete_file"]) {
-      await expect(policy.approve({
-        toolName,
-        risk: "write",
-        arguments: { path: "src/example.ts" },
-      })).resolves.toBe(true);
-    }
+    await expect(policy.approve({
+      toolName: "apply_patch",
+      risk: "write",
+      arguments: { patch: "*** Begin Patch\n*** Add File: src/example.ts\n+export {};\n*** End Patch" },
+    })).resolves.toBe(true);
     await expect(policy.approve({
       toolName: "run_command",
       risk: "execute",
@@ -82,6 +80,34 @@ describe("shell invocation", () => {
 });
 
 describe("run_command", () => {
+  it.runIf(process.platform === "darwin" && ["x64", "arm64"].includes(process.arch))(
+    "uses bundled rg without a system PATH and respects ignored files in another workspace",
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "simple-agent rg-"));
+      try {
+        await mkdir(path.join(root, ".git"));
+        await writeFile(path.join(root, ".gitignore"), "ignored.txt\n");
+        await writeFile(path.join(root, "visible.txt"), "bundled-search-fixture\n");
+        await writeFile(path.join(root, "ignored.txt"), "bundled-search-fixture\n");
+        vi.stubEnv("PATH", "");
+        vi.stubEnv("SHELL", "/bin/sh");
+        const tool = createRunCommandTool();
+        const result = await tool.execute(
+          tool.parse({ command: "rg --version && rg -n -F -- bundled-search-fixture ." }),
+          { workspaceRoot: root },
+        ) as { exitCode: number | null; output: string };
+
+        expect(result.exitCode).toBe(0);
+        expect(result.output).toContain("ripgrep 15.2.0");
+        expect(result.output).toContain("visible.txt:1:bundled-search-fixture");
+        expect(result.output).not.toContain("ignored.txt");
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("runs a command string inside the workspace", async () => {
     const tool = createRunCommandTool();
     const input = tool.parse({
@@ -112,6 +138,25 @@ describe("run_command", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("first-second");
+  });
+
+  it("inherits host environment variables regardless of their names", async () => {
+    const name = "CODE_AGENT_TEST_TOKEN_SECRET_PASSWORD_API_KEY";
+    const previous = process.env[name];
+    process.env[name] = "fixture-value";
+    try {
+      const tool = createRunCommandTool();
+      const command = "node -e \"console.log(process.env.CODE_AGENT_TEST_TOKEN_SECRET_PASSWORD_API_KEY === 'fixture-value' ? 'inherited' : 'missing')\"";
+      const result = await tool.execute(
+        tool.parse({ command, cwd: ".", timeoutMs: 10_000 }),
+        { workspaceRoot: process.cwd() },
+      ) as { exitCode: number | null; output: string };
+      expect(result.exitCode).toBe(0);
+      expect(result.output.trim()).toBe("inherited");
+    } finally {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    }
   });
 
   it.runIf(process.platform === "win32")("runs Windows command wrappers through PowerShell", async () => {

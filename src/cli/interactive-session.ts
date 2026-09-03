@@ -21,7 +21,6 @@ export interface InteractiveIO {
 export interface InteractiveSessionOptions {
   agent: InteractiveAgent;
   io: InteractiveIO;
-  initialTask?: string;
   initialModel?: string;
   availableModels?: string[];
   historyStore?: ConversationStore;
@@ -41,11 +40,10 @@ const HELP = `Commands:
 
 export async function runInteractiveSession(options: InteractiveSessionOptions): Promise<void> {
   let previousResponseId: string | undefined;
-  let pendingInput = options.initialTask?.trim() || undefined;
   let currentModel = options.initialModel?.trim() || undefined;
   let currentConversation: Conversation | undefined;
 
-  if (!pendingInput && options.historyStore) {
+  if (options.historyStore) {
     try {
       const selected = await selectInitialConversation(options.historyStore, options.io);
       if (selected === undefined) return;
@@ -66,8 +64,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
   );
 
   while (true) {
-    const input = pendingInput ?? await options.io.prompt("agent> ");
-    pendingInput = undefined;
+    const input = await options.io.prompt("agent> ");
     if (input === undefined) return;
 
     const task = input.trim();

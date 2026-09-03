@@ -21,7 +21,6 @@ describe("createConsoleEventLogger", () => {
     const stderr = captureOutput();
     const log = createConsoleEventLogger({
       stream: true,
-      interactive: true,
       stdout: stdout.output,
       stderr: stderr.output,
     });
@@ -51,7 +50,6 @@ describe("createConsoleEventLogger", () => {
     const stderr = captureOutput();
     const log = createConsoleEventLogger({
       stream: true,
-      interactive: false,
       stdout: stdout.output,
       stderr: stderr.output,
     });
@@ -67,7 +65,7 @@ describe("createConsoleEventLogger", () => {
       },
     });
 
-    expect(stdout.text()).toBe("fallback output\n");
+    expect(stdout.text()).toBe("assistant> fallback output\n\n");
     expect(stderr.text()).toContain("thinking> Raw reasoning text.\n");
   });
 });

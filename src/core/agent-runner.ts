@@ -12,7 +12,7 @@ import type {
 } from "./types.js";
 import type { AgentTool, ToolContext, ToolRegistry } from "../tools/types.js";
 
-export const DEFAULT_MAX_STEPS = 50;
+export const DEFAULT_MAX_STEPS = 100;
 
 const MIN_TOOL_OUTPUT_CHARS = 128;
 const TRUNCATION_MARKER = "…[truncated]…";
@@ -279,7 +279,7 @@ export class AgentRunner {
       maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
       maxToolOutputChars,
       maxParallelToolCalls,
-      stream: options.stream ?? false,
+      stream: options.stream ?? true,
     };
   }
 

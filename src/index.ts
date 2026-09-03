@@ -23,7 +23,9 @@ export type {
 export { buildAgentInstructions } from "./context/build-instructions.js";
 export { discoverMarkdownDocuments, formatDocumentCatalog } from "./context/document-catalog.js";
 export { loadProjectInstructions } from "./context/instruction-loader.js";
-export { discoverSkills, formatSkillCatalog } from "./context/skill-registry.js";
+export { discoverSkills } from "./context/skill-registry.js";
+export { createSkillCatalog, MAX_SKILL_CATALOG_CHARS } from "./context/skill-catalog.js";
+export type { SkillCatalog } from "./context/skill-catalog.js";
 export { OpenAIModel } from "./model/openai-model.js";
 export { JsonlTraceLogger } from "./logging/jsonl-trace-logger.js";
 export type { OpenAITraceEntry, OpenAITraceSink } from "./logging/openai-trace.js";

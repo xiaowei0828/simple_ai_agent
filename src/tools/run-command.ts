@@ -18,7 +18,7 @@ export function createRunCommandTool(): AgentTool<z.infer<typeof inputSchema>> {
       type: "function",
       name: "run_command",
       description:
-        `Run a command string in non-interactive ${shell.displayName}. Shell operators such as pipelines, redirects, and command chaining are evaluated by the shell. Use it for builds, tests, version control, and commands not covered by a structured tool.`,
+        `Run a command string in non-interactive ${shell.displayName}. Shell operators such as pipelines, redirects, and command chaining are evaluated by the shell. Use it for file reads, directory listings, file discovery, text searches, builds, tests, version control, and other commands. Read small files with cat and line ranges with sed -n (Get-Content with Select-Object in PowerShell). Prefer rg for text searches and rg --files for file discovery. Every invocation requires host approval.`,
       strict: true,
       parameters: {
         type: "object",

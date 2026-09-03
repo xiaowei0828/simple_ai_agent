@@ -1,11 +1,5 @@
 import type { ApprovalPolicy, ApprovalRequest } from "../core/types.js";
 
-const WORKSPACE_FILE_TOOLS = new Set([
-  "delete_file",
-  "replace_in_file",
-  "write_file",
-]);
-
 export class AllowAllApprovalPolicy implements ApprovalPolicy {
   async approve(): Promise<boolean> {
     return true;
@@ -38,7 +32,7 @@ export class AutoApproveWorkspaceFileOperationsPolicy implements ApprovalPolicy 
   }
 
   async approve(request: ApprovalRequest): Promise<boolean> {
-    if (request.risk === "write" && WORKSPACE_FILE_TOOLS.has(request.toolName)) {
+    if (request.risk === "write" && request.toolName === "apply_patch") {
       return true;
     }
     return this.#fallback.approve(request);

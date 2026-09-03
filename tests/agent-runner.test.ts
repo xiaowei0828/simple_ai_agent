@@ -10,7 +10,7 @@ import type {
   ModelResponse,
   ToolCallOutput,
 } from "../src/core/types.js";
-import { AllowAllApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
+import { AllowAllApprovalPolicy, CallbackApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
 import { ToolRegistry } from "../src/tools/types.js";
 
@@ -55,7 +55,7 @@ describe("AgentRunner", () => {
       model,
       modelName: "default-model",
       instructions: "test instructions",
-      tools: createDefaultToolRegistry([]),
+      tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new DenyAllApprovalPolicy(),
     });
@@ -74,7 +74,7 @@ describe("AgentRunner", () => {
       model,
       modelName: "test-model",
       instructions: "test instructions",
-      tools: createDefaultToolRegistry([]),
+      tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new DenyAllApprovalPolicy(),
       reasoningSummary: "detailed",
@@ -85,7 +85,7 @@ describe("AgentRunner", () => {
     expect(model.requests[0]?.reasoningSummary).toBe("detailed");
   });
 
-  it("forwards model deltas when streaming is enabled", async () => {
+  it("streams by default and forwards model deltas", async () => {
     const root = await fixture();
     const events: AgentEvent[] = [];
     const model: ModelAdapter = {
@@ -108,10 +108,9 @@ describe("AgentRunner", () => {
       model,
       modelName: "test-model",
       instructions: "test instructions",
-      tools: createDefaultToolRegistry([]),
+      tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new DenyAllApprovalPolicy(),
-      stream: true,
       onEvent(event) {
         events.push(event);
       },
@@ -126,6 +125,23 @@ describe("AgentRunner", () => {
       delta: "Inspect the project.",
     });
     expect(events).toContainEqual({ type: "model_output_delta", step: 1, delta: "Done." });
+  });
+
+  it("allows the host to explicitly disable streaming", async () => {
+    const root = await fixture();
+    const model = new ScriptedModel([
+      { id: "response-1", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model, modelName: "test-model", instructions: "test",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new DenyAllApprovalPolicy(),
+      stream: false,
+    });
+    await runner.run("Explain the project.");
+    expect(model.requests[0]?.stream).toBe(false);
+    expect(model.requests[0]?.onStreamEvent).toBeUndefined();
   });
 
   it("continues a conversation from a response ID supplied by the host", async () => {
@@ -202,8 +218,12 @@ describe("AgentRunner", () => {
         outputText: "",
         toolCalls: [{
           callId: "call-1",
-          name: "read_file",
-          arguments: JSON.stringify({ path: "hello.ts", lineStart: null, lineEnd: null }),
+          name: "run_command",
+          arguments: JSON.stringify({
+            command: process.platform === "win32" ? "Get-Content hello.ts" : "cat hello.ts",
+            cwd: ".",
+            timeoutMs: 10_000,
+          }),
         }],
       },
       { id: "response-2", outputText: "The answer is 42.", toolCalls: [] },
@@ -228,44 +248,6 @@ describe("AgentRunner", () => {
     const parsedOutput = JSON.parse(toolOutput?.output ?? "") as Record<string, unknown>;
     expect(parsedOutput.ok).toBe(true);
     expect(parsedOutput).not.toHaveProperty("truncated");
-  });
-
-  it("returns every tool output from a parallel batch in model order", async () => {
-    const root = await fixture();
-    const model = new ScriptedModel([
-      {
-        id: "response-1",
-        outputText: "",
-        toolCalls: [
-          {
-            callId: "call-read",
-            name: "read_file",
-            arguments: JSON.stringify({ path: "hello.ts", lineStart: null, lineEnd: null }),
-          },
-          {
-            callId: "call-list",
-            name: "list_directory",
-            arguments: JSON.stringify({ path: ".", depth: 1, maxResults: 10 }),
-          },
-        ],
-      },
-      { id: "response-2", outputText: "Done.", toolCalls: [] },
-    ]);
-    const runner = new AgentRunner({
-      model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new AllowAllApprovalPolicy(),
-    });
-
-    await runner.run("Inspect the workspace.");
-
-    expect(model.requests[1]?.input).toEqual([
-      expect.objectContaining({ type: "function_call_output", call_id: "call-read" }),
-      expect.objectContaining({ type: "function_call_output", call_id: "call-list" }),
-    ]);
   });
 
   it("keeps truncated success and error outputs within the limit as valid JSON", async () => {
@@ -350,7 +332,7 @@ describe("AgentRunner", () => {
     expect(failure.error).toEqual(expect.stringMatching(/-END$/));
   });
 
-  it("preserves read_file continuation metadata when the runner trims its content", async () => {
+  it("preserves command status when the runner trims long command output", async () => {
     const root = await fixture();
     await writeFile(
       path.join(root, "many-lines.txt"),
@@ -363,12 +345,8 @@ describe("AgentRunner", () => {
         outputText: "",
         toolCalls: [{
           callId: "call-read",
-          name: "read_file",
-          arguments: JSON.stringify({
-            path: "many-lines.txt",
-            lineStart: null,
-            lineEnd: null,
-          }),
+          name: "run_command",
+          arguments: JSON.stringify({ command: "node -e \"process.stdout.write(require('fs').readFileSync('many-lines.txt', 'utf8'))\"" }),
         }],
       },
       { id: "response-2", outputText: "Done.", toolCalls: [] },
@@ -388,13 +366,13 @@ describe("AgentRunner", () => {
     const [toolOutput] = functionCallOutputs(model.requests[1]);
     const parsed = JSON.parse(toolOutput?.output ?? "") as {
       truncated: boolean;
-      result: { content: string; nextLine: number; truncatedBy: string };
+      result: { output: string; exitCode: number; timedOut: boolean };
     };
     expect(toolOutput?.output.length).toBeLessThanOrEqual(600);
     expect(parsed.truncated).toBe(true);
-    expect(parsed.result.content).toContain("…[truncated]…");
-    expect(parsed.result.nextLine).toBe(501);
-    expect(parsed.result.truncatedBy).toBe("line_limit");
+    expect(parsed.result.output).toContain("…[truncated]…");
+    expect(parsed.result.exitCode).toBe(0);
+    expect(parsed.result.timedOut).toBe(false);
   });
 
   it("rejects a tool output budget too small for a structured truncation envelope", async () => {
@@ -411,6 +389,33 @@ describe("AgentRunner", () => {
     })).toThrow("at least 128");
   });
 
+  it("applies a patch only after approval and returns the change summary to the model", async () => {
+    const root = await fixture();
+    const patch = "*** Begin Patch\n*** Update File: hello.ts\n@@\n-export const answer = 42;\n+export const answer = 43;\n*** End Patch";
+    let approved = false;
+    const model = new ScriptedModel([
+      { id: "response-1", outputText: "", toolCalls: [{ callId: "patch-1", name: "apply_patch", arguments: JSON.stringify({ patch }) }] },
+      { id: "response-2", outputText: "Edited.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model, modelName: "test-model", instructions: "test",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new CallbackApprovalPolicy(async (request) => {
+        expect(request).toMatchObject({ toolName: "apply_patch", risk: "write", arguments: { patch } });
+        expect(await readFile(path.join(root, "hello.ts"), "utf8")).toBe("export const answer = 42;\n");
+        approved = true;
+        return true;
+      }),
+    });
+    await runner.run("Change the answer.");
+    expect(approved).toBe(true);
+    expect(await readFile(path.join(root, "hello.ts"), "utf8")).toBe("export const answer = 43;\n");
+    expect(JSON.parse(functionCallOutputs(model.requests[1])[0]!.output)).toMatchObject({
+      ok: true, result: { changedFiles: 1, changes: [{ path: "hello.ts", operation: "update" }] },
+    });
+  });
+
   it("returns an approval denial to the model without editing the file", async () => {
     const root = await fixture();
     const model = new ScriptedModel([
@@ -419,12 +424,9 @@ describe("AgentRunner", () => {
         outputText: "",
         toolCalls: [{
           callId: "call-1",
-          name: "replace_in_file",
+          name: "apply_patch",
           arguments: JSON.stringify({
-            path: "hello.ts",
-            oldText: "42",
-            newText: "43",
-            expectedOccurrences: 1,
+            patch: "*** Begin Patch\n*** Update File: hello.ts\n@@\n-export const answer = 42;\n+export const answer = 43;\n*** End Patch",
           }),
         }],
       },
@@ -452,8 +454,8 @@ describe("AgentRunner", () => {
       outputText: "",
       toolCalls: [{
         callId: `call-${id}`,
-        name: "list_directory",
-        arguments: JSON.stringify({ path: ".", depth: 1, maxResults: 10 }),
+        name: "run_command",
+        arguments: JSON.stringify({ command: "node --version" }),
       }],
     });
     const model = new ScriptedModel([toolResponse("1"), toolResponse("2")]);

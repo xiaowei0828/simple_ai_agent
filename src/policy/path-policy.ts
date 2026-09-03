@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 const BLOCKED_SEGMENTS = new Set([
@@ -16,7 +16,7 @@ const SENSITIVE_FILE_PATTERNS = [
   /\.(?:pem|p12|pfx|key)$/i,
 ];
 
-function isInside(root: string, candidate: string): boolean {
+export function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (
     relative !== ".." &&
@@ -72,12 +72,12 @@ export async function createWorkspacePathResolver(
     async resolveExisting(relativePath: string): Promise<string> {
       assertSafeRelativePath(relativePath);
       const lexicalCandidate = path.resolve(lexicalRoot, relativePath);
-      if (!isInside(lexicalRoot, lexicalCandidate)) {
+      if (!isPathInside(lexicalRoot, lexicalCandidate)) {
         throw new Error("Path escapes the workspace.");
       }
 
       const canonicalCandidate = await realpath(lexicalCandidate);
-      if (!isInside(canonicalRoot, canonicalCandidate)) {
+      if (!isPathInside(canonicalRoot, canonicalCandidate)) {
         throw new Error("Resolved path escapes the workspace through a symbolic link.");
       }
       assertSafeRelativePath(path.relative(canonicalRoot, canonicalCandidate) || ".");
@@ -87,15 +87,32 @@ export async function createWorkspacePathResolver(
     async resolveForMutation(relativePath: string): Promise<string> {
       assertSafeRelativePath(relativePath);
       const lexicalCandidate = path.resolve(lexicalRoot, relativePath);
-      if (!isInside(lexicalRoot, lexicalCandidate) || lexicalCandidate === lexicalRoot) {
+      if (!isPathInside(lexicalRoot, lexicalCandidate) || lexicalCandidate === lexicalRoot) {
         throw new Error("Path escapes the workspace or points to the workspace root.");
       }
 
-      const canonicalParent = await realpath(path.dirname(lexicalCandidate));
-      if (!isInside(canonicalRoot, canonicalParent)) {
+      // New files may need new directories. Check the closest existing ancestor
+      // without skipping dangling symlinks, which realpath alone would miss.
+      let ancestor = path.dirname(lexicalCandidate);
+      while (true) {
+        try {
+          await lstat(ancestor);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          const parent = path.dirname(ancestor);
+          if (parent === ancestor) throw error;
+          ancestor = parent;
+        }
+      }
+      const canonicalParent = await realpath(ancestor);
+      if (!isPathInside(canonicalRoot, canonicalParent)) {
         throw new Error("Resolved parent path escapes the workspace through a symbolic link.");
       }
       assertSafeRelativePath(path.relative(canonicalRoot, canonicalParent) || ".");
+      if (!(await stat(canonicalParent)).isDirectory()) {
+        throw new Error("Mutation parent must be a directory.");
+      }
       return lexicalCandidate;
     },
   };
@@ -111,14 +128,6 @@ export async function resolveExistingWorkspacePath(
   // On macOS, for example, /var resolves to /private/var; returning the canonical
   // candidate would make later workspace-relative paths incorrectly start with ../.
   return lexicalCandidate;
-}
-
-export async function resolveWorkspacePathForMutation(
-  workspaceRoot: string,
-  relativePath: string,
-): Promise<string> {
-  const resolver = await createWorkspacePathResolver(workspaceRoot);
-  return resolver.resolveForMutation(relativePath);
 }
 
 export function toWorkspaceRelative(workspaceRoot: string, absolutePath: string): string {

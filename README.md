@@ -6,18 +6,16 @@
 
 - Responses API 的多轮工具调用循环，并通过 `previous_response_id` 延续交互式会话
 - 默认启用 `parallel_tool_calls`，允许模型在一轮中批量返回多个独立工具调用；Host 顺序完成参数校验和审批，纯只读批次并发执行，包含写入或命令的批次按模型顺序执行
-- 默认创建的 SDK 客户端关闭自动重试，适配层也不会重试提前终止的响应体；请求失败会直接交给 Host。终态事件一旦到达便直接采用，不依赖后续 `[DONE]`。通过 `OpenAIModelOptions.client` 注入自定义客户端时，其重试策略由调用方负责
-- 七个基础工具：`list_directory`、`read_file`、`search_code`、`write_file`、`replace_in_file`、`delete_file`、`run_command`；发现 Skill 时额外注册 `load_skill`
-- `read_file` / `load_skill` 使用显式续读游标；工具输出超出上下文预算时优先压缩正文并保留 `nextLine` / `nextOffset` 等结构化字段
-- `search_code` 同时支持文件和目录、字面量大小写匹配、路径 glob 与上下文行；空 glob 等价于不筛选，目录发现、单文件大小、累计读取量和 12000 字符结构化结果都有硬上限，未完整扫描会返回原因
-- 工作区内的新建、修改、删除文件由宿主策略自动批准；`run_command` 支持逐次审批和受信环境下的 `--yes`
-- 工作区路径限制、符号链接逃逸检查、常见密钥文件拦截
-- 测试子进程会移除名称类似 token、secret、password、API key 的环境变量
+- 两个工具：`apply_patch`、`run_command`
+- 普通文件和 Skill 文件均通过命令行读取相关行范围。工具输出超出上下文预算时优先压缩正文并保留结构化字段
+- 文件读取、搜索和目录查看统一通过 `run_command`：优先使用 `rg` 搜索文本、`rg --files` 查找文件、`ls`（PowerShell 使用 `Get-ChildItem`）查看目录；随包提供 Windows/macOS 的 x64、ARM64 版 rg
+- 工作区内的 `apply_patch` 由宿主策略自动批准；`run_command` 支持逐次审批和受信环境下的 `--yes`
+- `apply_patch` 的工作区路径限制、符号链接逃逸检查、常见密钥文件拦截
 - `AGENTS.md` / `AGENTS.override.md` 项目指令加载
 - Markdown 文档目录：只注入路径和标题，需要时再读取正文
-- 本地 Skill 目录：只注入名称和描述，需要时通过 `load_skill` 加载完整 `SKILL.md`
+- 本地 Skill 目录：在 8,000 字符预算内提供名称、描述和绝对路径；超过预算时通过完整索引搜索，再按需读取 `SKILL.md`
 - `--debug` 将每次 OpenAI 原始请求和完整响应写入私有 JSONL 日志
-- `--stream` 通过 Responses API 事件流实时显示推理摘要和回答正文
+- 默认通过 Responses API 事件流实时显示推理摘要和回答正文，使用 `--no-stream` 可关闭流式输出
 - 可替换的 `ModelAdapter`，测试使用假模型，不消耗 API 调用
 
 ## 运行原理
@@ -55,30 +53,34 @@ npm install
 npm run dev -- --workspace .
 ```
 
-启动时会读取当前目录的 `.config/config.json`：
+启动前创建当前目录的 `.config/config.json`，启动时会从中加载连接设置。配置是一个数组，每项是一组 API key、地址和可用模型：
 
 ```json
-{
-  "apiKey": "your-api-key",
-  "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
-  "models": {
-    "default": "deepseek-v4-flash",
-    "available": ["deepseek-v4-flash"]
+[
+  {
+    "apiKey": "your-ark-api-key",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
+    "models": ["deepseek-v4-flash", "glm-5.3"],
+    "reasoningSummary": "auto"
   },
-  "reasoningSummary": "auto"
-}
+  {
+    "apiKey": "your-other-api-key",
+    "baseUrl": "https://provider.example.com/v1",
+    "models": ["provider-model"],
+    "reasoningSummary": "off"
+  }
+]
 ```
 
-`.config/` 已被 Git 和 Agent 文件工具忽略，避免 API Key 被提交或重新送入模型上下文。`models.default` 必须出现在 `models.available` 中。`reasoningSummary` 控制是否请求并在 console 中显示模型提供的推理摘要，可选值为 `off`、`auto`、`concise` 或 `detailed`，省略时默认为 `auto`。命令行 `--model` 可覆盖默认模型，`OPENAI_API_KEY` 和 `OPENAI_BASE_URL` 可覆盖配置文件中的对应值：
+默认使用第一组配置的第一个模型。`/model` 会列出所有组的模型，使用 `/model <序号或模型名>` 选择模型时，会同时使用该组的 `apiKey`、`baseUrl` 和 `reasoningSummary`。同名模型通过配置编号区分，例如 `1:shared-model`、`2:shared-model`；也可以直接按 `/model` 列表中的序号选择。
+
+每组的 `reasoningSummary` 控制是否请求并显示推理摘要，可选值为 `off`、`auto`、`concise` 或 `detailed`，省略时默认为 `auto`。
+
+`.config/` 已被 Git 忽略，`apply_patch` 禁止修改其中的文件。命令行读取不受这层文件路径策略限制，应在审批时检查读取范围。
 
 CLI 优先显示 API 返回的 reasoning summary。部分兼容接口（例如启用了 reasoning parser 的 vLLM）会改为返回 `reasoning_text`；此时 CLI 会显示接口明确提供的原始推理文本，HTML 运行报告也会将它标记为 `reasoning text`。这类内容可能包含完整思考过程，请注意 console 输出和 `.agent-runs/` 日志的访问范围。如果兼容接口明确拒绝 reasoning summary 参数，CLI 会提示一次，移除该参数后发起一次兼容降级请求，并在当前进程内不再为该模型请求摘要。
 
-```bash
-export OPENAI_BASE_URL="https://provider.example.com/v1"
-npm run dev -- --workspace . --model "provider-model"
-```
-
-启动后输入自然语言任务：
+启动后在 `agent>` 输入自然语言任务：
 
 ```text
 Interactive mode. Type /help for commands.
@@ -90,28 +92,15 @@ agent> 继续解释工具审批是怎么实现的
 assistant> ...
 ```
 
-也可以执行一次性任务，输出结果后立即退出：
+默认开启流式输出，实时显示推理摘要和回答正文。需要等待完整响应再显示时，可以显式关闭：
 
 ```bash
-npm run dev -- --workspace /path/to/project "修复失败的单元测试"
-```
-
-如果既提供初始任务又希望继续对话，使用：
-
-```bash
-npm run dev -- --interactive "先介绍项目结构"
-```
-
-默认使用非流式响应。需要实时显示模型输出时，只需增加 `--stream`，不需要修改配置文件：
-
-```bash
-npm run dev -- --stream --workspace .
-npm run dev -- --stream --interactive "先介绍项目结构"
+npm run dev -- --workspace . --no-stream
 ```
 
 流式模式只实时展示增量内容；工具调用仍会等待完整参数生成后再校验和审批，历史记录也只在收到最终响应后保存。
 
-CLI 默认批准 workspace 内的结构化文件操作；每次 `run_command` 都会显示命令并询问。查看全部选项：
+CLI 默认批准 workspace 内的 `apply_patch`；每次 `run_command` 都会显示命令并询问。查看全部选项：
 
 ```bash
 npm run dev -- --help
@@ -119,7 +108,7 @@ npm run dev -- --help
 
 ## 通用命令执行
 
-模型可以通过一个结构化的 `run_command` 工具运行构建、测试和版本控制命令，不需要为 CMake、Make、Git、Cargo 等程序分别定义 function：
+模型通过 `run_command` 完成文件读取、目录查看、文件查找、文本搜索、构建、测试和版本控制，不需要为 rg、CMake、Make、Git、Cargo 等程序分别定义 function：
 
 ```json
 {
@@ -131,22 +120,59 @@ npm run dev -- --help
 
 `run_command` 接收完整的 Shell 命令字符串。Windows 使用无 Profile 的非交互 PowerShell；macOS 使用 `$SHELL`（未设置时回退 `/bin/zsh`），同样以非交互模式启动。当前 Shell 的名称和路径会写入模型 instructions，因此模型会使用对应语法。`&&`、管道、重定向、变量和其它 Shell 语法会直接交给 Shell 解析。
 
-Host 验证 `run_command` 的工作目录仍在 workspace 内，同时移除名称类似 API key、token、secret、password 的环境变量，并限制执行时间和回传输出。每次调用都会交给 Host 审批；交互提示中输入 `y` 仅批准本次，输入 `n` 或直接回车则拒绝。受信环境可以使用 `--yes` 跳过 `run_command` 确认。内置文件工具只能操作 workspace 内的路径，其新建、修改和删除操作默认批准。
+项目在 `vendor/ripgrep/` 中预置 ripgrep 15.2.0，覆盖 Windows x64/ARM64 和 macOS Intel/Apple Silicon。`run_command` 根据当前 Node.js 进程的平台和架构，将对应目录加入子进程 `PATH` 前面，因此这些平台无需单独安装 rg，运行时也无需下载。源码运行和编译后的 npm 包使用同一组二进制；其他平台沿用系统 `PATH`。
+
+常用搜索和读取命令（以下示例使用 Unix Shell）：
+
+```bash
+rg --files src -g '*runner*'
+rg -l -F -- 'AgentRunner' src
+rg -n -F -C 3 -- 'AgentRunner' src/core
+ls src
+cat package.json
+sed -n '1,160p' src/core/agent-runner.ts
+```
+
+模型先定位仓库或模块，再收窄搜索范围；默认遵循命令自身的忽略规则。`rg` 退出码 1 表示没有匹配，2 表示执行错误。输出截断时应缩小范围后重新搜索。PowerShell 使用 `Get-Content file.txt | Select-Object -Skip 20 -First 40` 读取行范围。文件读取、搜索与目录查看同样经过 `run_command` 的宿主审批。
+
+Host 验证 `run_command` 的工作目录仍在 workspace 内，并限制执行时间和回传输出。每次调用都会交给 Host 审批；交互提示中输入 `y` 仅批准本次，输入 `n` 或直接回车则拒绝。受信环境可以使用 `--yes` 跳过 `run_command` 确认。`apply_patch` 只能修改 workspace 内允许的文件路径，默认由宿主策略批准。命令字符串中的文件路径不受 `apply_patch` 的路径过滤限制。
 
 这套策略是教育项目中的防误操作边界，不是完整的操作系统沙箱。对不受信任的仓库执行构建脚本时，还应使用容器或 OS 沙箱限制文件系统和网络访问。
+
+## 文件修改
+
+`apply_patch` 统一负责创建、局部编辑、移动和删除文件，替代原先的三个写文件工具。它沿用 JSON function calling，参数只有 `{ "patch": "补丁正文" }`，兼容当前 Responses API 适配器。补丁正文使用以下语法：
+
+```diff
+*** Begin Patch
+*** Add File: src/greeting.ts
++export const greeting = "hello";
+*** Update File: src/example.ts
+@@
+-export const answer = 42;
++export const answer = 43;
+*** Delete File: src/obsolete.ts
+*** End Patch
+```
+
+移动文件时，在 `*** Update File: 原路径` 后添加 `*** Move to: 新路径`，可同时附带修改块。`@@ 文本` 从精确匹配的行之后寻找修改位置；`*** End of File` 要求修改块匹配到文件末尾。上下文行以空格开头，删除行以 `-` 开头，新增行以 `+` 开头。
+
+工具先校验整份补丁、路径和修改上下文，再执行写入。上下文不匹配或有歧义、创建或移动的目标已存在、目标路径冲突时会拒绝执行。新增文件会创建缺失的父目录；更新会保留 LF/CRLF 风格和文件末尾换行状态。补丁限 1 MB、100 个文件操作，待更新及更新后的文件均限 1 MB；更新只支持 UTF-8 文本。
+
+这不是多文件事务：实际写入期间发生 I/O 错误时，工具会报告已完成的操作和可能发生修改的路径。写入仍先交给 `ApprovalPolicy`，默认 CLI 策略自动批准 `apply_patch`，其他宿主可以拒绝或逐次审批。
 
 ## 交互式会话
 
 每轮成功响应的 `responseId` 会作为下一轮请求的 `previous_response_id`，因此“继续解释”“修改刚才提到的文件”等追问能看到此前上下文。具体机制参考 OpenAI 官方的 [conversation state](https://developers.openai.com/api/docs/guides/conversation-state)。
 
-成功完成的交互会话还会保存在工作区的 `.agent-history/` 中。直接启动交互模式且没有传入初始任务时，CLI 会列出最近的历史会话，可以输入序号或 ID 前缀继续，也可以输入 `0` 开启新对话。恢复会话时优先使用保存的 `responseId`；如果兼容 API 已经删除了对应的远端 response，则自动回放本地保存的 user/assistant 消息并建立新的 response 链。
+成功完成的交互会话还会保存在工作区的 `.agent-history/` 中。启动时若有已保存的历史会话，CLI 会列出最近的记录，可以输入序号或 ID 前缀继续，也可以输入 `0` 开启新对话。恢复会话时优先使用保存的 `responseId`；如果兼容 API 已经删除了对应的远端 response，则自动回放本地保存的 user/assistant 消息并建立新的 response 链。
 
 每个历史文件包含会话标题、模型、时间、最后一个 response ID 以及成功完成的消息轮次。默认标题取第一条用户消息的前 60 个字符，使用 `/rename` 可以修改。历史按工作区隔离，不会在不同代码仓库之间混用。
 
 交互命令：
 
-- `/model`：显示当前模型以及 `.config/config.json` 中的可用模型
-- `/model <序号或名称>`：切换模型并开启新对话，例如 `/model 2` 或 `/model glm-5.3`
+- `/model`：显示当前模型以及 `.config/config.json` 所有连接中的可用模型
+- `/model <序号或名称>`：切换模型及其 API 连接，并开启新对话，例如 `/model 2` 或 `/model glm-5.3`
 - `/history`：列出当前工作区保存的历史会话
 - `/resume <序号或 ID 前缀>`：切换到某一个历史会话
 - `/rename <标题>`：重命名当前历史会话
@@ -158,7 +184,7 @@ Host 验证 `run_command` 的工作目录仍在 workspace 内，同时移除名�
 
 `/new` 和 `/resume` 只切换模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；`run_command` 仍需逐次确认，`--yes` 可跳过确认。
 
-`.agent-history/` 已被 Git 和 Agent 文件工具忽略。历史中仍可能包含用户输入、模型回复、源码片段或路径，因此不应把该目录提交或共享给其他人。
+`.agent-history/` 已被 Git 忽略，`apply_patch` 禁止修改该目录。历史中仍可能包含用户输入、模型回复、源码片段或路径，因此不应把该目录提交或共享给其他人。
 
 ## 查看 OpenAI 原始请求和响应
 
@@ -188,8 +214,8 @@ agent: raw OpenAI log: /path/to/project/.agent-runs/2026-08-14T15-10-00-000Z-123
 日志文件权限设置为仅当前用户可读写（`0600`）。由于日志可能包含项目源码和用户数据：
 
 - `.agent-runs/` 已被当前仓库的 `.gitignore` 忽略
-- Agent 文件工具也禁止读取 `.agent-runs/`，避免日志再次进入模型上下文
-- `.agent-history/` 同样被 `.gitignore` 和 Agent 文件工具屏蔽
+- `apply_patch` 禁止修改 `.agent-runs/` 和 `.agent-history/`
+- `.agent-history/` 同样被 `.gitignore` 忽略；命令行仍可读取这些目录，读取范围由宿主审批把关
 - 对其他目标项目使用 `--workspace` 时，建议把 `.agent-runs/` 和 `.agent-history/` 加入该项目的 `.gitignore`
 
 可以用 `jq` 格式化查看：
@@ -227,7 +253,7 @@ npm run trace:view -- run.jsonl --output reports/run.html
 不同 Markdown 使用两种策略：
 
 1. `AGENTS.md` 是约束，启动时全文注入。若为某个子目录运行 Agent，可沿目录层级加载；同一目录的 `AGENTS.override.md` 优先。
-2. `README.md`、`docs/*.md` 等说明文档只把“路径 + 一级标题”放入目录。模型判断相关后再调用 `read_file`，避免大量无关内容占用上下文。
+2. `README.md`、`docs/*.md` 等说明文档只把“路径 + 一级标题”放入目录。模型判断相关后再通过 `run_command` 读取相关行范围，避免大量无关内容占用上下文。
 
 当前 CLI 的工作目录就是 `--workspace` 根目录。宿主以后可调用 `loadProjectInstructions(workspaceRoot, activeFileDirectory)`，从而让 VS Code 当前文件所在目录的指令生效。
 
@@ -264,22 +290,33 @@ Agent 默认扫描：
 例如加载仓库里的示例 Skill：
 
 ```bash
-npm run dev -- --skill-root ./examples/skills '$code-review 检查当前实现'
+npm run dev -- --skill-root ./examples/skills
 ```
 
-启动阶段只向模型提供 Skill 名称和不超过 80 字符的 `routing`；没有 `routing` 时使用截短的 `description`。模型使用下面的调用读取 Skill 入口：
+然后在 `agent>` 输入“使用 code-review 检查当前实现”。
 
-```json
-{ "name": "code-review", "resource": "SKILL.md", "offset": null, "limit": null }
+Skill 使用分层加载：
+
+- **目录较小**：完整元数据不超过 8,000 字符时，将全部名称、描述、绝对文件路径和可选 `routing` 注入 instructions，不再把每条描述截到 80 字符。技能正文不进入初始上下文。
+- **目录较大**：在系统临时目录生成本次会话的 `index.jsonl`，每行是一项完整元数据。instructions 只给出总数量、索引绝对路径和搜索说明。模型通过 `run_command` 用 `rg` 搜索名称或描述，拿到匹配项的 `filePath` 后读取对应技能；索引包含全部已发现的技能，不会只保留前几个。会话结束时删除临时索引。
+- **正文较长**：先查看行数和标题，再用 `sed -n` 或 PowerShell 的 `Get-Content | Select-Object` 分段读完入口文件；输出截断时缩小读取范围并补读。引用资料仅在任务需要时读取，同一份指令不反复加载。
+
+以下为 Unix Shell 示例，路径替换为目录或索引中给出的实际绝对路径：
+
+```bash
+rg -n -i -- 'review|代码审查' '/absolute/session/index.jsonl'
+wc -l '/absolute/skills/code-review/SKILL.md'
+rg -n '^#{1,6} ' '/absolute/skills/code-review/SKILL.md'
+sed -n '1,120p' '/absolute/skills/code-review/SKILL.md'
+sed -n '121,240p' '/absolute/skills/code-review/SKILL.md'
+sed -n '1,120p' '/absolute/skills/code-review/references/checklist.md'
 ```
 
-如果 `SKILL.md` 引用了同一 Skill 目录下的其他文件，仍通过 `load_skill` 渐进读取：
+引用资料、脚本和资产的相对路径均以 `SKILL.md` 所在目录为基准。使用技能绝对路径时，`run_command.cwd` 仍保持在 workspace 内。目录检索、技能读取和脚本执行均经过 `run_command` 的宿主审批。
 
-```json
-{ "name": "code-review", "resource": "references/checklist.md", "offset": null, "limit": null }
-```
+编写 Skill 时，将 `SKILL.md` 保持为简短的入口，包含触发条件、关键步骤、必要约束和参考资料路径；将详细规范、示例和不同任务分支拆到 `references/`。分段读取限制单次回传量，但读过的内容仍会留在会话上下文中，当前尚未实现会话历史的自动摘要或压缩。
 
-单次最多返回 15000 字符；结果中的 `nextOffset` 非空时，用它作为下一次 `offset` 继续读取。所有 Skill 根中的名称必须全局唯一，同名不会静默覆盖。资源路径以对应 Skill 目录为根，不能通过绝对路径、`..` 或符号链接逃逸。机器公共目录可这样配置：
+其它 Host 使用 `createSkillCatalog(skills)` 创建目录，将返回的 `content` 传给 `buildAgentInstructions`，并在会话结束时调用 `dispose()` 清理索引。所有 Skill 根中的名称必须全局唯一，同名不会静默覆盖。机器公共目录可这样配置：
 
 ```bash
 export CODE_AGENT_SKILL_ROOTS="/usr/local/share/code-agent/skills"
@@ -310,16 +347,19 @@ npm test
 npm run build
 ```
 
-测试覆盖工具调用回传、审批拒绝、轮数上限、路径逃逸、敏感文件、精确替换、项目指令、Markdown 目录和 Skill 发现。
+测试覆盖工具调用回传、审批拒绝、轮数上限、路径逃逸、敏感文件、多文件补丁、模型连接切换、项目指令、Markdown 目录和 Skill 发现。
 
 ## 代码导航
 
 - `src/core/agent-runner.ts`：Agent 状态机和工具循环
 - `src/cli/interactive-session.ts`：跨轮 responseId、交互命令和会话重置
 - `src/logging/`：OpenAI 原始请求/响应的 JSONL 调试日志
+- `src/config/app-config.ts`：连接配置加载及模型选择
+- `src/model/configured-model.ts`：模型到 API 连接的路由
 - `src/model/openai-model.ts`：Responses API 适配器
 - `src/tools/`：工具定义、参数 Schema 和执行逻辑
 - `src/context/`：项目说明、Markdown 和 Skill 上下文
+- `src/context/skill-catalog.ts`：Skill 目录预算和可搜索的完整临时索引
 - `src/policy/`：审批及工作区安全边界
 - `src/cli/main.ts`：CLI Host，可作为 VS Code Host 的参考
 - `tests/`：不调用真实模型的行为测试

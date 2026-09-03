@@ -4,24 +4,27 @@ import { homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
+import { parseCliArgs, USAGE } from "./arguments.js";
 import { createConsoleEventLogger } from "./console-event-logger.js";
 import { runInteractiveSession } from "./interactive-session.js";
 import { openInDefaultBrowser } from "./open-default-browser.js";
 import {
   loadAppConfig,
-  DEFAULT_REASONING_SUMMARY,
+  listConfiguredModels,
   resolveAppConfigPath,
   resolveRuntimeModelConfig,
 } from "../config/app-config.js";
-import { AgentRunner, DEFAULT_MAX_STEPS } from "../core/agent-runner.js";
+import { AgentRunner } from "../core/agent-runner.js";
 import type { ApprovalRequest } from "../core/types.js";
 import { buildAgentInstructions } from "../context/build-instructions.js";
 import { discoverMarkdownDocuments } from "../context/document-catalog.js";
 import { loadProjectInstructions } from "../context/instruction-loader.js";
 import { discoverSkills } from "../context/skill-registry.js";
+import { createSkillCatalog, type SkillCatalog } from "../context/skill-catalog.js";
 import { JsonlTraceLogger } from "../logging/jsonl-trace-logger.js";
 import { JsonConversationStore } from "../history/conversation-store.js";
 import { OpenAIModel } from "../model/openai-model.js";
+import { ConfiguredModel } from "../model/configured-model.js";
 import { generateTraceReport } from "../trace-viewer/generate-report.js";
 import { findLatestTraceFile } from "../trace-viewer/latest-trace.js";
 import {
@@ -29,104 +32,6 @@ import {
   CallbackApprovalPolicy,
 } from "../policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../tools/index.js";
-
-interface CliOptions {
-  workspace: string;
-  model?: string;
-  maxSteps: number;
-  skillRoots: string[];
-  autoApprove: boolean;
-  interactive: boolean;
-  stream: boolean;
-  debug: boolean;
-  help: boolean;
-  task: string;
-}
-
-const USAGE = `simple-code-agent [options] [task]
-
-Options:
-  -w, --workspace <path>    Workspace root (default: current directory)
-  -m, --model <name>        Override the model configured in .config/config.json
-      --max-steps <number>  Maximum model turns (default: ${DEFAULT_MAX_STEPS})
-      --skill-root <path>   Additional directory containing <skill>/SKILL.md
-      --stream              Stream model output as it is generated
-      --debug               Write raw OpenAI request/response JSONL logs
-  -i, --interactive         Continue interactively after an optional initial task
-  -y, --yes                 Approve run_command calls without prompting
-  -h, --help                Show this help
-
-Environment:
-  OPENAI_API_KEY                 Override the configured API key
-  OPENAI_BASE_URL                Override the configured compatible API base URL
-  CODE_AGENT_SKILL_ROOTS         Extra skill roots separated by the OS path delimiter
-
-Configuration:
-  .config/config.json            API key, base URL, default model, and available models
-
-Examples:
-  npm run dev -- --workspace .
-  npm run dev -- --workspace . "inspect the project and fix the failing tests"
-  npm run dev -- --interactive "first inspect the project"`;
-
-export function parseCliArgs(argv: string[]): CliOptions {
-  const options: CliOptions = {
-    workspace: process.cwd(),
-    maxSteps: DEFAULT_MAX_STEPS,
-    skillRoots: [],
-    autoApprove: false,
-    interactive: false,
-    stream: false,
-    debug: false,
-    help: false,
-    task: "",
-  };
-  const taskParts: string[] = [];
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === "--") {
-      taskParts.push(...argv.slice(index + 1));
-      break;
-    }
-    if (argument === "-h" || argument === "--help") {
-      options.help = true;
-    } else if (argument === "--stream") {
-      options.stream = true;
-    } else if (argument === "--debug") {
-      options.debug = true;
-    } else if (argument === "-i" || argument === "--interactive") {
-      options.interactive = true;
-    } else if (argument === "-y" || argument === "--yes") {
-      options.autoApprove = true;
-    } else if (argument === "-w" || argument === "--workspace") {
-      options.workspace = requireValue(argv, ++index, argument);
-    } else if (argument === "-m" || argument === "--model") {
-      options.model = requireValue(argv, ++index, argument);
-    } else if (argument === "--max-steps") {
-      const value = Number(requireValue(argv, ++index, argument));
-      if (!Number.isInteger(value) || value < 1 || value > 100) {
-        throw new Error("--max-steps must be an integer between 1 and 100.");
-      }
-      options.maxSteps = value;
-    } else if (argument === "--skill-root") {
-      options.skillRoots.push(requireValue(argv, ++index, argument));
-    } else if (argument?.startsWith("-")) {
-      throw new Error(`Unknown option: ${argument}`);
-    } else if (argument) {
-      taskParts.push(argument);
-    }
-  }
-
-  options.task = taskParts.join(" ").trim();
-  return options;
-}
-
-function requireValue(argv: string[], index: number, option: string): string {
-  const value = argv[index];
-  if (!value) throw new Error(`${option} requires a value.`);
-  return value;
-}
 
 async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
@@ -136,14 +41,7 @@ async function main(): Promise<void> {
   }
   const configPath = resolveAppConfigPath();
   const appConfig = await loadAppConfig(configPath);
-  const runtimeConfig = resolveRuntimeModelConfig(appConfig, {
-    apiKey: process.env.OPENAI_API_KEY,
-    baseUrl: process.env.OPENAI_BASE_URL,
-    model: options.model,
-  });
-  if (!runtimeConfig.apiKey) {
-    throw new Error(`API key is not configured. Set apiKey in '${configPath}' or OPENAI_API_KEY.`);
-  }
+  const runtimeConfig = resolveRuntimeModelConfig(appConfig);
 
   const workspaceRoot = await realpath(path.resolve(options.workspace));
   if (!(await stat(workspaceRoot)).isDirectory()) throw new Error("--workspace must point to a directory.");
@@ -179,23 +77,19 @@ async function main(): Promise<void> {
     process.stderr.write(`agent: raw OpenAI log: ${traceLogger.filePath}\n`);
   }
 
-  const interactiveMode = options.interactive || !options.task;
   const logEvent = createConsoleEventLogger({
     stream: options.stream,
-    interactive: interactiveMode,
   });
-  const readline = interactiveMode || !options.autoApprove
-    ? createInterface({ input: process.stdin, output: process.stderr })
-    : undefined;
+  const readline = createInterface({ input: process.stdin, output: process.stderr });
   let readlineClosed = false;
-  readline?.on("close", () => {
+  readline.on("close", () => {
     readlineClosed = true;
   });
-  readline?.on("SIGINT", () => readline.close());
+  readline.on("SIGINT", () => readline.close());
   const interactiveApprovalPolicy = new CallbackApprovalPolicy(async (request: ApprovalRequest) => {
     if (options.autoApprove) return true;
     const preview = JSON.stringify(request.arguments, null, 2).slice(0, 2_000);
-    const answer = await readline!.question(
+    const answer = await readline.question(
       `\nApprove ${request.risk} tool '${request.toolName}'?\n${preview}\n[y/N] `,
     );
     const decision = answer.trim().toLowerCase();
@@ -205,68 +99,65 @@ async function main(): Promise<void> {
     interactiveApprovalPolicy,
   );
 
+  let skillCatalog: SkillCatalog | undefined;
   try {
+    skillCatalog = await createSkillCatalog(skills);
     const runner = new AgentRunner({
-      model: new OpenAIModel({
-        apiKey: runtimeConfig.apiKey,
-        baseURL: runtimeConfig.baseUrl,
+      model: new ConfiguredModel(appConfig, (connection) => new OpenAIModel({
+        apiKey: connection.apiKey,
+        baseURL: connection.baseUrl,
         traceSink: traceLogger,
-      }),
-      modelName: runtimeConfig.model,
-      instructions: buildAgentInstructions(projectInstructions, skills, documents),
-      tools: createDefaultToolRegistry(skills),
+      })),
+      modelName: runtimeConfig.selector,
+      instructions: buildAgentInstructions(projectInstructions, skillCatalog.content, documents),
+      tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot },
       approvalPolicy,
       maxSteps: options.maxSteps,
       stream: options.stream,
-      reasoningSummary: appConfig.reasoningSummary === "off"
-        ? undefined
-        : appConfig.reasoningSummary ?? DEFAULT_REASONING_SUMMARY,
       onEvent: logEvent,
     });
 
-    if (interactiveMode) {
-      await runInteractiveSession({
-        agent: runner,
-        initialTask: options.task || undefined,
-        initialModel: runtimeConfig.model,
-        availableModels: appConfig.models.available,
-        historyStore,
-        async viewLatestTrace() {
-          await traceLogger?.flush();
-          const tracePath = traceLogger?.filePath ?? await findLatestTraceFile(traceDirectory);
-          if (!tracePath) {
-            throw new Error("No trace log found. Start the agent with --debug to record interactions.");
+    await runInteractiveSession({
+      agent: runner,
+      initialModel: runtimeConfig.selector,
+      availableModels: listConfiguredModels(appConfig).map((choice) => choice.selector),
+      historyStore,
+      async viewLatestTrace() {
+        await traceLogger?.flush();
+        const tracePath = traceLogger?.filePath ?? await findLatestTraceFile(traceDirectory);
+        if (!tracePath) {
+          throw new Error("No trace log found. Start the agent with --debug to record interactions.");
+        }
+        const generated = await generateTraceReport(tracePath);
+        await openInDefaultBrowser(generated.outputPath);
+        return generated.outputPath;
+      },
+      io: {
+        async prompt(label) {
+          if (readlineClosed) return undefined;
+          try {
+            return await readline.question(label);
+          } catch (error) {
+            if (readlineClosed) return undefined;
+            throw error;
           }
-          const generated = await generateTraceReport(tracePath);
-          await openInDefaultBrowser(generated.outputPath);
-          return generated.outputPath;
         },
-        io: {
-          async prompt(label) {
-            if (!readline || readlineClosed) return undefined;
-            try {
-              return await readline.question(label);
-            } catch (error) {
-              if (readlineClosed) return undefined;
-              throw error;
-            }
-          },
-          writeAssistant(output) {
-            if (!options.stream) process.stdout.write(`assistant> ${output}\n\n`);
-          },
-          writeStatus(output) {
-            process.stderr.write(`${output}\n`);
-          },
+        writeAssistant(output) {
+          if (!options.stream) process.stdout.write(`assistant> ${output}\n\n`);
         },
-      });
-    } else {
-      const result = await runner.run(options.task);
-      if (!options.stream) process.stdout.write(`${result.output}\n`);
-    }
+        writeStatus(output) {
+          process.stderr.write(`${output}\n`);
+        },
+      },
+    });
   } finally {
-    readline?.close();
-    await traceLogger?.close();
+    readline.close();
+    try {
+      await traceLogger?.close();
+    } finally {
+      await skillCatalog?.dispose();
+    }
   }
 }
 

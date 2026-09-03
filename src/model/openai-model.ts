@@ -11,13 +11,18 @@ import type { ModelAdapter, ModelRequest, ModelResponse } from "../core/types.js
 import { PreviousResponseUnavailableError } from "../core/errors.js";
 import type { OpenAITraceSink } from "../logging/openai-trace.js";
 
-export interface OpenAIModelOptions {
-  apiKey?: string;
-  baseURL?: string;
-  client?: OpenAI;
+export type OpenAIModelOptions = ({
+  apiKey: string;
+  baseURL: string;
+  client?: never;
+} | {
+  client: OpenAI;
+  apiKey?: never;
+  baseURL?: never;
+}) & {
   parallelToolCalls?: boolean;
   traceSink?: OpenAITraceSink;
-}
+};
 
 interface CompletedResponseWithHttp {
   data: OpenAIResponse;
@@ -32,7 +37,10 @@ export class OpenAIModel implements ModelAdapter {
   readonly #endpoint: string;
   readonly #reasoningSummaryUnsupportedModels = new Set<string>();
 
-  constructor(options: OpenAIModelOptions = {}) {
+  constructor(options: OpenAIModelOptions) {
+    if (!options.client && (!options.apiKey?.trim() || !options.baseURL?.trim())) {
+      throw new Error("OpenAIModel requires an explicit apiKey and baseURL, or a client.");
+    }
     this.#client = options.client ?? new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,

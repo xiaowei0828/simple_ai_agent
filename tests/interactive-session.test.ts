@@ -23,15 +23,33 @@ class FakeInteractiveAgent implements InteractiveAgent {
 }
 
 describe("runInteractiveSession", () => {
+  it("waits for interactive input and exits at EOF without requesting the model", async () => {
+    const agent = new FakeInteractiveAgent();
+    const prompts: string[] = [];
+    await runInteractiveSession({
+      agent,
+      io: {
+        async prompt(label) {
+          expect(agent.calls).toEqual([]);
+          prompts.push(label);
+          return undefined;
+        },
+        writeAssistant() {},
+        writeStatus() {},
+      },
+    });
+    expect(prompts).toEqual(["agent> "]);
+    expect(agent.calls).toEqual([]);
+  });
+
   it("chains successful turns and resets context with /new", async () => {
     const agent = new FakeInteractiveAgent();
-    const inputs = ["follow up", "/new", "fresh question", "/help", "/unknown", "/exit"];
+    const inputs = ["first question", "follow up", "/new", "fresh question", "/help", "/unknown", "/exit"];
     const assistantOutputs: string[] = [];
     const statusOutputs: string[] = [];
 
     await runInteractiveSession({
       agent,
-      initialTask: "first question",
       io: {
         async prompt() {
           return inputs.shift();
@@ -158,15 +176,15 @@ describe("runInteractiveSession", () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
     const store = new JsonConversationStore(path.join(root, ".agent-history"));
     const firstAgent = new FakeInteractiveAgent();
+    const firstInputs = ["first question", "/exit"];
 
     await runInteractiveSession({
       agent: firstAgent,
       historyStore: store,
-      initialTask: "first question",
       initialModel: "test-model",
       io: {
         async prompt() {
-          return "/exit";
+          return firstInputs.shift();
         },
         writeAssistant() {},
         writeStatus() {},

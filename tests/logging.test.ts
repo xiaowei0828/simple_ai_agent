@@ -2,14 +2,29 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import OpenAI from "openai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PreviousResponseUnavailableError } from "../src/core/errors.js";
 import type { ModelStreamEvent } from "../src/core/types.js";
 import { JsonlTraceLogger } from "../src/logging/jsonl-trace-logger.js";
 import type { OpenAITraceEntry } from "../src/logging/openai-trace.js";
-import { OpenAIModel } from "../src/model/openai-model.js";
+import { OpenAIModel, type OpenAIModelOptions } from "../src/model/openai-model.js";
 
 describe("raw OpenAI logging", () => {
+  it("requires explicit credentials and endpoint even when SDK environment variables are set", () => {
+    vi.stubEnv("OPENAI_API_KEY", "environment-fixture-key");
+    vi.stubEnv("OPENAI_BASE_URL", "https://environment.test/v1");
+    try {
+      expect(() => new OpenAIModel({ apiKey: "explicit-key" } as OpenAIModelOptions))
+        .toThrow("explicit apiKey and baseURL");
+      expect(() => new OpenAIModel({ baseURL: "https://explicit.test/v1" } as OpenAIModelOptions))
+        .toThrow("explicit apiKey and baseURL");
+      expect(() => new OpenAIModel({ apiKey: "explicit-key", baseURL: "https://explicit.test/v1" }))
+        .not.toThrow();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("writes complete JSONL entries to a private file", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-log-"));
     const logger = await JsonlTraceLogger.create(path.join(root, ".agent-runs"));

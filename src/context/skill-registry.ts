@@ -1,5 +1,7 @@
-import { open, readdir, realpath } from "node:fs/promises";
+import { readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { isPathInside } from "../policy/path-policy.js";
+import { readUtf8Prefix } from "./read-prefix.js";
 
 export interface SkillMetadata {
   name: string;
@@ -8,17 +10,7 @@ export interface SkillMetadata {
   filePath: string;
 }
 
-const MAX_CATALOG_DESCRIPTION_CHARS = 80;
 const MAX_SKILL_METADATA_BYTES = 10_000;
-
-function isInside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return relative === "" || (
-    relative !== ".." &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
-  );
-}
 
 function unquote(value: string): string {
   const trimmed = value.trim();
@@ -82,12 +74,12 @@ export async function discoverSkills(roots: string[]): Promise<SkillMetadata[]> 
           realpath(filePath),
         ]);
         canonicalFile = resolvedFile;
-        if (!isInside(canonicalSkillsRoot, canonicalRoot)) {
+        if (!isPathInside(canonicalSkillsRoot, canonicalRoot)) {
           throw new Error(
             `Skill directory '${skillDirectory}' resolves outside its configured root '${absoluteRoot}'.`,
           );
         }
-        if (!isInside(canonicalRoot, canonicalFile)) {
+        if (!isPathInside(canonicalRoot, canonicalFile)) {
           throw new Error(
             `Skill entry point '${filePath}' resolves outside its declared directory '${skillDirectory}'.`,
           );
@@ -97,7 +89,7 @@ export async function discoverSkills(roots: string[]): Promise<SkillMetadata[]> 
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw error;
       }
-      const metadata = parseMetadata(content.slice(0, 10_000), entry.name);
+      const metadata = parseMetadata(content, entry.name);
       const existing = skills.get(metadata.name);
       if (existing) {
         if (canonicalFilesByName.get(metadata.name) === canonicalFile) continue;
@@ -110,28 +102,4 @@ export async function discoverSkills(roots: string[]): Promise<SkillMetadata[]> 
     }
   }
   return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-async function readUtf8Prefix(filePath: string, maxBytes: number): Promise<string> {
-  const handle = await open(filePath, "r");
-  try {
-    const buffer = Buffer.alloc(maxBytes);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    return buffer.subarray(0, bytesRead).toString("utf8");
-  } finally {
-    await handle.close();
-  }
-}
-
-export function formatSkillCatalog(skills: SkillMetadata[]): string {
-  if (skills.length === 0) return "No local skills were discovered.";
-  return skills
-    .map((skill) => `- ${skill.name}: ${compactDescription(skill.routing ?? skill.description)}`)
-    .join("\n");
-}
-
-function compactDescription(description: string): string {
-  const compact = description.replace(/\s+/gu, " ").trim();
-  if (compact.length <= MAX_CATALOG_DESCRIPTION_CHARS) return compact;
-  return `${compact.slice(0, MAX_CATALOG_DESCRIPTION_CHARS - 1)}…`;
 }

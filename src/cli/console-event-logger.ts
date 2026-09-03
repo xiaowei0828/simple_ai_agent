@@ -7,7 +7,6 @@ interface TextOutput {
 
 export interface ConsoleEventLoggerOptions {
   stream: boolean;
-  interactive: boolean;
   stdout?: TextOutput;
   stderr?: TextOutput;
 }
@@ -25,7 +24,7 @@ export function createConsoleEventLogger(
   const writeOutput = (delta: string): void => {
     if (!delta) return;
     if (!outputOpen) {
-      if (options.interactive) stdout.write("assistant> ");
+      stdout.write("assistant> ");
       outputOpen = true;
     }
     outputStarted = true;
@@ -34,7 +33,7 @@ export function createConsoleEventLogger(
 
   const closeOutput = (): void => {
     if (!outputOpen) return;
-    stdout.write(options.interactive ? "\n\n" : "\n");
+    stdout.write("\n\n");
     outputOpen = false;
   };
 

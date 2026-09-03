@@ -6,6 +6,10 @@
   "description": "A small, educational code agent built on the OpenAI Responses API.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "vendor/ripgrep"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

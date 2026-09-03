@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { isPathInside } from "../policy/path-policy.js";
 
 const MAX_INSTRUCTION_CHARS = 60_000;
 
@@ -22,7 +23,7 @@ export async function loadProjectInstructions(
   workingDirectory = workspaceRoot,
 ): Promise<LoadedInstructions> {
   const relativeWorkingDirectory = path.relative(workspaceRoot, workingDirectory);
-  if (relativeWorkingDirectory.startsWith("..") || path.isAbsolute(relativeWorkingDirectory)) {
+  if (!isPathInside(workspaceRoot, workingDirectory)) {
     throw new Error("workingDirectory must be inside workspaceRoot.");
   }
 
