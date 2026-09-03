@@ -428,7 +428,7 @@ describe("OpenAIModel", () => {
     expect(emitted).toEqual([{ type: "output_text_delta", delta: "partial" }]);
   });
 
-  it("falls back without reasoning summaries when a compatible endpoint rejects them", async () => {
+  it.each([undefined, "low"] as const)("preserves reasoning effort (%s) when falling back without reasoning summaries", async (effort) => {
     const transmittedBodies: Array<Record<string, unknown>> = [];
     let requestCount = 0;
     const client = new OpenAI({
@@ -480,6 +480,7 @@ describe("OpenAIModel", () => {
       instructions: "test instructions",
       input: "hello",
       reasoningSummary: "auto" as const,
+      reasoningEffort: effort,
       tools: [],
     };
 
@@ -490,8 +491,29 @@ describe("OpenAIModel", () => {
     expect(cachedFallback.reasoningSummaryUnavailable).toBeUndefined();
     expect(requestCount).toBe(3);
     expect(transmittedBodies[0]).toMatchObject({ reasoning: { summary: "auto" } });
-    expect(transmittedBodies[1]).not.toHaveProperty("reasoning");
-    expect(transmittedBodies[2]).not.toHaveProperty("reasoning");
+    if (effort) {
+      expect(transmittedBodies[0]!.reasoning).toEqual({ summary: "auto", effort });
+      expect(transmittedBodies[1]!.reasoning).toEqual({ effort });
+      expect(transmittedBodies[2]!.reasoning).toEqual({ effort });
+    } else {
+      expect(transmittedBodies[1]).not.toHaveProperty("reasoning");
+      expect(transmittedBodies[2]).not.toHaveProperty("reasoning");
+    }
+  });
+
+  it("sends explicit reasoning effort none and does not treat effort errors as unsupported summaries", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const model = new OpenAIModel({ client: new OpenAI({ apiKey: "fixture-key", baseURL: "https://fixture.test/v1", maxRetries: 0,
+      fetch: async (_input, init) => {
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify({ error: { message: "Unsupported value for reasoning.effort", type: "invalid_request_error" } }),
+          { status: 400, headers: { "content-type": "application/json" } });
+      },
+    }) });
+    await expect(model.respond({ model: "test", input: "hello", instructions: "test", tools: [], reasoningEffort: "none", reasoningSummary: "auto" }))
+      .rejects.toThrow("reasoning.effort");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]!.reasoning).toEqual({ effort: "none", summary: "auto" });
   });
 
 });

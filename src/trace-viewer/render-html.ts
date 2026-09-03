@@ -131,7 +131,8 @@ function renderWarnings(warnings: string[]): string {
 
 function renderTurn(turn: TraceTurn): string {
   const hasFailure = Boolean(turn.error) || turn.toolCalls.some((call) => call.result?.ok === false);
-  const isFinal = !turn.error && turn.toolCalls.length === 0 && turn.assistantMessages.length > 0;
+  const isCompaction = turn.purpose === "compaction";
+  const isFinal = !isCompaction && !turn.error && turn.toolCalls.length === 0 && turn.assistantMessages.length > 0;
   const kinds = [turn.toolCalls.length ? "tools" : "", hasFailure ? "errors" : "", isFinal ? "final" : ""]
     .filter(Boolean)
     .join(" ");
@@ -142,7 +143,7 @@ function renderTurn(turn: TraceTurn): string {
     <div class="turn-body">
       <header class="turn-header">
         <div>
-          <h3>第 ${formatNumber(turn.index)} 次模型请求</h3>
+          <h3>第 ${formatNumber(turn.index)} 次模型请求${isCompaction ? " · 上下文压缩" : ""}</h3>
           <div class="turn-time">${escapeHtml(formatTimestamp(turn.startedAt))}</div>
         </div>
         <div class="turn-badges">
@@ -157,7 +158,7 @@ function renderTurn(turn: TraceTurn): string {
       ${resultCount > 0 ? `<div class="continuation"><span>↳</span> 收到上一轮 ${formatNumber(resultCount)} 个工具结果后继续推理</div>` : ""}
       ${turn.reasoningSummaries.map((reasoning) => renderReasoning(reasoning, "summary")).join("\n")}
       ${turn.reasoningTexts.map((reasoning) => renderReasoning(reasoning, "text")).join("\n")}
-      ${turn.assistantMessages.map((message) => renderAssistantMessage(message, isFinal)).join("\n")}
+      ${turn.assistantMessages.map((message) => renderAssistantMessage(message, isFinal, isCompaction)).join("\n")}
       ${turn.toolCalls.length > 0 ? `<div class="tool-call-list">${turn.toolCalls.map(renderToolCall).join("\n")}</div>` : ""}
       ${turn.error ? renderError(turn.error) : ""}
       ${renderTurnFooter(turn)}
@@ -188,9 +189,9 @@ function renderReasoning(reasoning: string, kind: "summary" | "text"): string {
   </details>`;
 }
 
-function renderAssistantMessage(message: string, isFinal: boolean): string {
+function renderAssistantMessage(message: string, isFinal: boolean, isCompaction = false): string {
   return `<section class="event assistant-event${isFinal ? " final-answer" : ""}">
-    <div class="event-label"><span class="event-dot assistant-dot"></span>${isFinal ? "最终回答" : "模型消息"}</div>
+    <div class="event-label"><span class="event-dot assistant-dot"></span>${isCompaction ? "压缩摘要" : isFinal ? "最终回答" : "模型消息"}</div>
     <div class="message-text">${escapeHtml(message.trim())}</div>
   </section>`;
 }

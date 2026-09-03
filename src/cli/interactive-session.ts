@@ -1,5 +1,5 @@
 import type { AgentRunOptions } from "../core/agent-runner.js";
-import type { AgentRunResult } from "../core/types.js";
+import type { AgentRunResult, CompactionResult, ReasoningEffort } from "../core/types.js";
 import {
   createConversationTitle,
   replayConversation,
@@ -10,6 +10,7 @@ import {
 
 export interface InteractiveAgent {
   run(task: string, options?: AgentRunOptions): Promise<AgentRunResult>;
+  compact?(options: AgentRunOptions, customInstructions?: string): Promise<CompactionResult | undefined>;
 }
 
 export interface InteractiveIO {
@@ -23,6 +24,10 @@ export interface InteractiveSessionOptions {
   io: InteractiveIO;
   initialModel: string;
   availableModels?: string[];
+  reasoningConfig?: (model: string) => {
+    reasoningEffort: ReasoningEffort;
+    supportedReasoningEfforts: readonly ReasoningEffort[];
+  };
   historyStore: ConversationStore;
   viewLatestTrace?: (conversationId?: string) => Promise<string>;
 }
@@ -30,10 +35,13 @@ export interface InteractiveSessionOptions {
 const HELP = `Commands:
   /model                 Show the current and available models
   /model <number|name>   Switch models and start a new conversation
+  /reasoning             Show the current and supported reasoning efforts
+  /reasoning <effort>    Change reasoning effort for this conversation
   /history               List saved conversations
   /resume <number|id>    Resume a saved conversation
   /rename <title>        Rename the current conversation
   /trace                 Generate and open the current session trace report
+  /compact [focus]       Summarize older history while retaining recent work
   /new                   Start a new conversation
   /help                  Show this help
   /exit                  Exit the agent`;
@@ -56,10 +64,31 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
     options.io.writeStatus(`Unable to load conversation history: ${errorMessage(error)}`);
   }
 
+  let currentReasoningEffort = restoreReasoningEffort();
   let availableModels = uniqueModels(currentModel, options.availableModels ?? []);
   options.io.writeStatus(
-    `Interactive mode. Model: ${currentModel}. Type /help for commands.`,
+    `Interactive mode. Model: ${currentModel}.${currentReasoningEffort ? ` Reasoning: ${currentReasoningEffort}.` : ""} Type /help for commands.`,
   );
+
+  function restoreReasoningEffort(): ReasoningEffort | undefined {
+    try {
+      const config = options.reasoningConfig?.(currentModel);
+      const saved = currentConversation?.reasoningEffort;
+      if (!config) return saved;
+      if (saved && config.supportedReasoningEfforts.includes(saved)) return saved;
+      if (saved) options.io.writeStatus(`Saved reasoning effort '${saved}' is unavailable for ${currentModel}; using ${config.reasoningEffort}.`);
+      return config.reasoningEffort;
+    } catch (error) {
+      options.io.writeStatus(`Unable to load reasoning settings: ${errorMessage(error)}`);
+      return undefined;
+    }
+  }
+
+  async function saveReasoningEffort(): Promise<void> {
+    if (currentConversation && currentReasoningEffort && currentConversation.reasoningEffort !== currentReasoningEffort) {
+      currentConversation = await options.historyStore.setReasoningEffort(currentConversation.id, currentReasoningEffort);
+    }
+  }
 
   while (true) {
     const input = await options.io.prompt("agent> ");
@@ -103,6 +132,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           currentConversation = await options.historyStore.load(selected.id);
           previousResponseId = undefined;
           currentModel = currentConversation.model;
+          currentReasoningEffort = restoreReasoningEffort();
           availableModels = uniqueModels(currentModel, availableModels);
           options.io.writeStatus(formatResumedConversation(currentConversation));
         } catch (error) {
@@ -131,6 +161,67 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       case "/help":
         options.io.writeStatus(HELP);
         continue;
+      case "/compact": {
+        if (!currentConversation) {
+          options.io.writeStatus("There is no saved current conversation to compact.");
+          continue;
+        }
+        if (!options.agent.compact) {
+          options.io.writeStatus("Compaction is unavailable in this session.");
+          continue;
+        }
+        try {
+          await saveReasoningEffort();
+          options.historyStore.beginCompaction(currentConversation.id);
+          const result = await options.agent.compact({
+            model: currentModel, history: replayConversation(currentConversation),
+            reasoningEffort: currentReasoningEffort,
+            summary: currentConversation.summary, contextUsage: currentConversation.contextUsage,
+          }, commandArguments.join(" ") || undefined);
+          if (result) {
+            previousResponseId = undefined;
+            currentConversation = await options.historyStore.load(currentConversation.id);
+          } else {
+            options.io.writeStatus("No older complete message group is available to compact.");
+          }
+        } catch (error) {
+          previousResponseId = undefined;
+          // A checkpoint may have committed before a later reporting error.
+          try { currentConversation = await options.historyStore.load(currentConversation.id); }
+          catch (loadError) { options.io.writeStatus(`Unable to reload conversation: ${errorMessage(loadError)}`); }
+          options.io.writeStatus(`Compaction failed: ${errorMessage(error)}`);
+        } finally {
+          options.historyStore.endCompaction();
+        }
+        continue;
+      }
+      case "/reasoning": {
+        try {
+          const config = options.reasoningConfig?.(currentModel);
+          if (!config) {
+            options.io.writeStatus("Reasoning selection is unavailable in this session.");
+            continue;
+          }
+          const selector = commandArguments.join(" ").toLowerCase();
+          if (!selector) {
+            options.io.writeStatus(`Reasoning effort: ${currentReasoningEffort}. Supported: ${config.supportedReasoningEfforts.join(", ")}. Use /reasoning <effort>.`);
+            continue;
+          }
+          const effort = config.supportedReasoningEfforts.find((value) => value === (selector === "mid" ? "medium" : selector));
+          if (!effort) {
+            options.io.writeStatus(`Unsupported reasoning effort: ${selector}. Choose: ${config.supportedReasoningEfforts.join(", ")}.`);
+            continue;
+          }
+          if (effort !== currentReasoningEffort && currentConversation) {
+            currentConversation = await options.historyStore.setReasoningEffort(currentConversation.id, effort);
+          }
+          currentReasoningEffort = effort;
+          options.io.writeStatus(`Reasoning effort: ${effort}. Applies to subsequent requests in this conversation.`);
+        } catch (error) {
+          options.io.writeStatus(`Unable to change reasoning effort: ${errorMessage(error)}`);
+        }
+        continue;
+      }
       case "/model": {
         const selector = commandArguments.join(" ").trim();
         if (!selector) {
@@ -150,6 +241,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         }
         currentModel = selectedModel;
         currentConversation = undefined;
+        currentReasoningEffort = restoreReasoningEffort();
         previousResponseId = undefined;
         options.io.writeStatus(`Switched to model: ${selectedModel}. Started a new conversation.`);
         continue;
@@ -178,18 +270,20 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
     }
 
     try {
-      const history = currentConversation && !previousResponseId
-        ? replayConversation(currentConversation)
-        : undefined;
+      const history = currentConversation ? replayConversation(currentConversation) : undefined;
       if (!currentConversation) {
-        currentConversation = await options.historyStore.create({ model: currentModel, title: createConversationTitle(task) });
+        currentConversation = await options.historyStore.create({ model: currentModel, title: createConversationTitle(task), reasoningEffort: currentReasoningEffort });
         options.io.writeStatus(`Session log: ${options.historyStore.filePath(currentConversation.id)}`);
       }
+      await saveReasoningEffort();
       await options.historyStore.beginTurn(currentConversation.id, task);
       const result = await options.agent.run(task, {
         previousResponseId,
         ...(history?.length ? { history } : {}),
+        ...(currentConversation.summary ? { summary: currentConversation.summary } : {}),
+        ...(currentConversation.contextUsage ? { contextUsage: currentConversation.contextUsage } : {}),
         model: currentModel,
+        ...(currentReasoningEffort ? { reasoningEffort: currentReasoningEffort } : {}),
       });
 
       previousResponseId = result.responseId;

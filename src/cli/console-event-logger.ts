@@ -66,6 +66,17 @@ export function createConsoleEventLogger(
 
   return (event: AgentEvent): void => {
     switch (event.type) {
+      case "compaction_started":
+        closeReasoning();
+        closeOutput();
+        stderr.write(`agent: compacting context (${event.reason}, approximately ${event.tokensBefore} tokens)\n`);
+        break;
+      case "compaction_completed":
+        stderr.write(`agent: context compacted, approximately ${event.result.tokensBefore} → ${event.result.tokensAfter} tokens\n`);
+        break;
+      case "compaction_failed":
+        stderr.write(`agent: compaction failed: ${event.error}\n`);
+        break;
       case "run_started":
         stderr.write("agent: started\n");
         break;

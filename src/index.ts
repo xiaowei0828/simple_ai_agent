@@ -1,5 +1,8 @@
 export { AgentLimitError, AgentRunner, DEFAULT_MAX_STEPS } from "./core/agent-runner.js";
+export { REASONING_EFFORTS } from "./core/types.js";
 export type { AgentRunOptions } from "./core/agent-runner.js";
+export { resolveCompactionSettings } from "./core/context-compaction.js";
+export type { CompactionSettings, CompactionResult, ContextUsage } from "./core/types.js";
 export type {
   AgentEvent,
   AgentRunResult,
@@ -13,6 +16,7 @@ export type {
   ModelStreamEvent,
   ModelStreamEventHandler,
   ReasoningSummaryMode,
+  ReasoningEffort,
 } from "./core/types.js";
 export { JsonlConversationStore, createConversationTitle, replayConversation } from "./history/session-store.js";
 export type {

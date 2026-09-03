@@ -1,10 +1,11 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runInteractiveSession, type InteractiveAgent, type InteractiveSessionOptions } from "../src/cli/interactive-session.js";
 import type { AgentRunOptions } from "../src/core/agent-runner.js";
 import type { AgentRunResult } from "../src/core/types.js";
+import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { JsonlConversationStore } from "../src/history/session-store.js";
 
 const roots: string[] = [];
@@ -86,7 +87,9 @@ describe("runInteractiveSession", () => {
 
     expect(agent.calls).toEqual([
       { task: "first question", options: { previousResponseId: undefined, model: "test-model" } },
-      { task: "follow up", options: { previousResponseId: "response-1", model: "test-model" } },
+      { task: "follow up", options: { previousResponseId: "response-1", model: "test-model", history: [
+        { role: "user", content: "first question" }, { role: "assistant", content: "answer-1" },
+      ] } },
       { task: "fresh question", options: { previousResponseId: undefined, model: "test-model" } },
     ]);
     expect(assistantOutputs).toEqual(["answer-1", "answer-2", "answer-3"]);
@@ -132,6 +135,61 @@ describe("runInteractiveSession", () => {
     expect(statuses.some((output) => output.includes("* 1. model-a"))).toBe(true);
     expect(statuses.some((output) => output.includes("Switched to model: model-b"))).toBe(true);
     expect(statuses.some((output) => output.includes("Unknown model: missing"))).toBe(true);
+  });
+
+  it("changes reasoning without adding turns, passes it to manual compaction, and restores it on resume", async () => {
+    const store = await createStore();
+    const agent = new FakeInteractiveAgent();
+    const compactOptions: AgentRunOptions[] = [];
+    const inputs = ["/reasoning", "first", "/reasoning high", "/reasoning max", "/reasoning low extra", "follow up", "/compact", "/exit"];
+    const statuses: string[] = [];
+    const reasoningConfig: NonNullable<InteractiveSessionOptions["reasoningConfig"]> = () => ({
+      reasoningEffort: "medium", supportedReasoningEfforts: ["low", "medium", "high"],
+    });
+    await runSession({
+      agent: { run: (task, options) => agent.run(task, options), async compact(options) { compactOptions.push(options); return undefined; } },
+      historyStore: store, reasoningConfig,
+      io: { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus(text) { statuses.push(text); } },
+    });
+    expect(agent.calls.map((call) => call.options?.reasoningEffort)).toEqual(["medium", "high"]);
+    expect(agent.calls[1]!.options?.previousResponseId).toBe("response-1");
+    expect(compactOptions).toHaveLength(1);
+    expect(compactOptions[0]!.reasoningEffort).toBe("high");
+    expect(statuses.some((text) => text.includes("Supported: low, medium, high"))).toBe(true);
+    expect(statuses.filter((text) => text.includes("Unsupported reasoning effort"))).toHaveLength(2);
+    const summaries = await store.list();
+    expect(summaries).toHaveLength(1);
+    const saved = await store.load(summaries[0]!.id);
+    expect(saved.reasoningEffort).toBe("high");
+    expect(saved.turns).toHaveLength(2);
+    const report = parseOpenAITraceJsonl(await readFile(store.filePath(saved.id), "utf8"));
+    expect(report.turns).toHaveLength(2);
+    expect(report.turns[0]!.rawRequest).toMatchObject({ body: { reasoning: { effort: "medium" } } });
+    expect(report.turns[1]!.rawRequest).toMatchObject({ body: { reasoning: { effort: "high" } } });
+    const resumed = new FakeInteractiveAgent();
+    const resume = [saved.id, "continue", "/reasoning mid", "continue again", "/exit"];
+    await runSession({ agent: resumed, historyStore: store, reasoningConfig,
+      io: { async prompt() { return resume.shift(); }, writeAssistant() {}, writeStatus() {} },
+    });
+    expect(resumed.calls.map((call) => call.options?.reasoningEffort)).toEqual(["high", "medium"]);
+    expect(resumed.calls[0]!.options?.previousResponseId).toBeUndefined();
+    expect((await store.load(saved.id)).reasoningEffort).toBe("medium");
+    expect((await store.load(saved.id)).turns).toHaveLength(4);
+  });
+
+  it("uses the model default when a saved effort is no longer allowed", async () => {
+    const store = await createStore();
+    const saved = await store.create({ model: "test-model", title: "saved", reasoningEffort: "high" });
+    const agent = new FakeInteractiveAgent();
+    const inputs = ["0", `/resume ${saved.id}`, "continue", "/exit"];
+    const statuses: string[] = [];
+    await runSession({ agent, historyStore: store,
+      reasoningConfig: () => ({ reasoningEffort: "medium", supportedReasoningEfforts: ["medium"] }),
+      io: { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus(text) { statuses.push(text); } },
+    });
+    expect(agent.calls[0]!.options?.reasoningEffort).toBe("medium");
+    expect(statuses.some((text) => text.includes("using medium"))).toBe(true);
+    expect((await store.load(saved.id)).reasoningEffort).toBe("medium");
   });
 
   it("opens the latest trace report without sending a model request", async () => {
@@ -244,7 +302,10 @@ describe("runInteractiveSession", () => {
       },
     });
     expect(agent.calls[resumedIndex + 1]).toEqual({
-      task: "again", options: { previousResponseId: `response-${resumedIndex + 1}`, model: "test-model" },
+      task: "again", options: { previousResponseId: `response-${resumedIndex + 1}`, model: "test-model", history: [
+        { role: "user", content: "earlier question" }, { role: "assistant", content: "earlier answer" },
+        { role: "user", content: "follow up" }, { role: "assistant", content: `answer-${resumedIndex + 1}` },
+      ] },
     });
     expect((await store.load(conversation.id)).turns).toHaveLength(3);
   });

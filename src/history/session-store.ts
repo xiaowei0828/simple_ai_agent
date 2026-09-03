@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir, truncate, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { AgentEvent, ModelInputItem, ModelResponse } from "../core/types.js";
+import { REASONING_EFFORTS, type AgentEvent, type ContextUsage, type ModelInputItem, type ModelResponse, type ReasoningEffort } from "../core/types.js";
+import { responseContextUsage, responseInputItems } from "../core/context-compaction.js";
 import type { OpenAITraceEntry, OpenAITraceSink } from "../logging/openai-trace.js";
 
 const turnSchema = z.object({
@@ -14,10 +15,13 @@ export interface Conversation {
   id: string;
   title: string;
   model: string;
+  reasoningEffort?: ReasoningEffort;
   createdAt: string;
   updatedAt: string;
   turns: ConversationTurn[];
   context: ModelInputItem[];
+  summary?: string;
+  contextUsage?: ContextUsage;
   status: "idle" | "running" | "failed";
   pendingTask?: string;
 }
@@ -26,7 +30,7 @@ export interface ConversationSummary {
   status: Conversation["status"];
 }
 export interface CreateConversationInput {
-  model: string; title: string;
+  model: string; title: string; reasoningEffort?: ReasoningEffort;
 }
 export interface ConversationStore {
   list(): Promise<ConversationSummary[]>;
@@ -34,9 +38,12 @@ export interface ConversationStore {
   create(input: CreateConversationInput): Promise<Conversation>;
   appendTurn(id: string, turn: ConversationTurn): Promise<Conversation>;
   rename(id: string, title: string): Promise<Conversation>;
+  setReasoningEffort(id: string, effort: ReasoningEffort): Promise<Conversation>;
   beginTurn(id: string, task: string): Promise<void>;
   failTurn(id: string, error: string): Promise<void>;
   filePath(id: string): string;
+  beginCompaction(id: string): void;
+  endCompaction(): void;
 }
 interface StoreOptions {
   onWarning?: (message: string) => void;
@@ -52,6 +59,7 @@ export interface SessionEntry {
 const headerSchema = z.object({
   type: z.literal("session.created"), schemaVersion: z.literal(2),
   id: z.string().uuid(), title: z.string().trim().min(1), model: z.string().min(1), timestamp: z.string(),
+  reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
 });
 
 /** One append-only file is the source for both resume and the trace viewer. */
@@ -97,6 +105,7 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
     if (header.id !== id) throw new Error("Session ID does not match its filename.");
     const conversation: Conversation = {
       schemaVersion: 2, id, title: header.title, model: header.model,
+      ...(header.reasoningEffort ? { reasoningEffort: header.reasoningEffort } : {}),
       createdAt: header.timestamp, updatedAt: header.timestamp, turns: [], context: [], status: "idle",
     };
     let hasResponse = false;
@@ -104,6 +113,9 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
     for (const entry of entries.slice(1)) {
       if (entry.type.startsWith("session.")) conversation.updatedAt = entry.timestamp;
       switch (entry.type) {
+        case "session.reasoning_effort_changed":
+          conversation.reasoningEffort = z.enum(REASONING_EFFORTS).parse(entry.reasoningEffort);
+          break;
         case "session.renamed": conversation.title = z.string().min(1).parse(entry.title); break;
         case "session.turn_started":
           conversation.pendingTask = z.string().parse(entry.task);
@@ -113,7 +125,14 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
           break;
         case "session.model_response":
           conversation.context.push(...responseInputItems(entry.response as ModelResponse));
+          conversation.contextUsage = responseContextUsage(entry.response as ModelResponse, conversation.context.length)
+            ?? conversation.contextUsage;
           hasResponse = true;
+          break;
+        case "session.compacted":
+          conversation.summary = z.string().trim().min(1).parse(entry.summary);
+          conversation.context = z.array(z.record(z.string(), z.unknown())).parse(entry.replacementHistory) as ModelInputItem[];
+          conversation.contextUsage = undefined;
           break;
         case "session.tool_output": conversation.context.push(entry.output as ModelInputItem); break;
         case "session.turn_completed": {
@@ -136,7 +155,7 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
   async create(input: CreateConversationInput): Promise<Conversation> {
     const id = randomUUID();
     const timestamp = new Date().toISOString();
-    const header = headerSchema.parse({ type: "session.created", schemaVersion: 2, id, timestamp, model: input.model, title: input.title });
+    const header = headerSchema.parse({ type: "session.created", schemaVersion: 2, id, timestamp, model: input.model, title: input.title, reasoningEffort: input.reasoningEffort });
     await mkdir(this.#directory, { recursive: true });
     await writeFile(this.filePath(id), JSON.stringify(header) + "\n", { flag: "wx", mode: 0o600 });
     this.#ready.add(id);
@@ -146,6 +165,16 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
   async beginTurn(id: string, task: string): Promise<void> {
     this.#active = { id, turnId: randomUUID(), step: 0 };
     await this.#append(id, { type: "session.turn_started", timestamp: new Date().toISOString(), turnId: this.#active.turnId, task });
+  }
+
+  /** Manual compaction uses the same journal without adding a user turn. */
+  beginCompaction(id: string): void {
+    this.filePath(id);
+    this.#active = { id, turnId: randomUUID(), step: 0 };
+  }
+
+  endCompaction(): void {
+    this.#active = undefined;
   }
 
   async appendTurn(id: string, turn: ConversationTurn): Promise<Conversation> {
@@ -164,12 +193,23 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
     return this.load(id);
   }
 
+  async setReasoningEffort(id: string, effort: ReasoningEffort): Promise<Conversation> {
+    await this.#append(id, {
+      type: "session.reasoning_effort_changed", timestamp: new Date().toISOString(),
+      reasoningEffort: z.enum(REASONING_EFFORTS).parse(effort),
+    });
+    return this.load(id);
+  }
+
   async recordAgentEvent(event: AgentEvent): Promise<void> {
     const active = this.#active;
     if (!active) return;
-    if (event.type === "model_requested") active.step = event.step;
-    if (!["model_requested", "model_response", "tool_output"].includes(event.type)) return;
-    await this.#append(active.id, { ...event, type: `session.${event.type}`, timestamp: new Date().toISOString(), turnId: active.turnId });
+    if (event.type === "model_requested" || event.type === "compaction_started") active.step = event.step;
+    if (!["model_requested", "model_response", "tool_output", "compaction_started", "compaction_completed", "compaction_failed"].includes(event.type)) return;
+    const saved = event.type === "compaction_completed"
+      ? { ...event.result, type: "session.compacted", step: event.step }
+      : { ...event, type: `session.${event.type}` };
+    await this.#append(active.id, { ...saved, timestamp: new Date().toISOString(), turnId: active.turnId });
   }
 
   /** Debug entries share the session file and the same request coordinates. */
@@ -239,14 +279,6 @@ export function parseSessionEntries(contents: string): SessionEntry[] {
     }
   }
   return entries;
-}
-
-export function responseInputItems(response: ModelResponse): ModelInputItem[] {
-  if (response.outputItems) return response.outputItems;
-  return [
-    ...(response.outputText ? [{ role: "assistant" as const, content: response.outputText }] : []),
-    ...response.toolCalls.map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments })),
-  ];
 }
 
 /** Unknown execution outcomes become context, never automatic tool re-execution. */

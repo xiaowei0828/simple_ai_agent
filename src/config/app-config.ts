@@ -1,17 +1,35 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { ReasoningSummaryMode } from "../core/types.js";
+import { REASONING_EFFORTS, type ReasoningEffort, type ReasoningSummaryMode } from "../core/types.js";
 
 export const DEFAULT_REASONING_SUMMARY = "auto" as const;
+export const DEFAULT_REASONING_EFFORT = "medium" as const;
+
+const effortSchema = z.enum(REASONING_EFFORTS);
+const reasoningDefaultsSchema = z.object({
+  reasoningEffort: effortSchema.optional(),
+  reasoningSummary: z.enum(["off", "auto", "concise", "detailed"]).optional(),
+}).strict();
+
+const modelConfigSchema = z.object({
+  ...reasoningDefaultsSchema.shape,
+  id: z.string().trim().min(1),
+  contextWindow: z.number().int().min(1_024).optional(),
+  supportedReasoningEfforts: z.array(effortSchema).min(1).optional(),
+}).strict().superRefine((model, context) => {
+  const supported = model.supportedReasoningEfforts ?? REASONING_EFFORTS;
+  if (new Set(supported).size !== supported.length) {
+    context.addIssue({ code: "custom", path: ["supportedReasoningEfforts"], message: "reasoning efforts must be unique" });
+  }
+});
 
 const connectionConfigSchema = z.object({
   apiKey: z.string().trim().min(1),
   baseUrl: z.string().url(),
-  models: z.array(z.string().trim().min(1)).min(1),
-  reasoningSummary: z.enum(["off", "auto", "concise", "detailed"]).optional(),
+  models: z.array(modelConfigSchema).min(1),
 }).strict().superRefine((config, context) => {
-  if (new Set(config.models.map((model) => model.toLowerCase())).size !== config.models.length) {
+  if (new Set(config.models.map((model) => model.id.toLowerCase())).size !== config.models.length) {
     context.addIssue({
       code: "custom",
       path: ["models"],
@@ -20,10 +38,25 @@ const connectionConfigSchema = z.object({
   }
 });
 
-const appConfigSchema = z.array(connectionConfigSchema).min(1).superRefine((config, context) => {
+const appConfigSchema = z.object({
+  defaults: reasoningDefaultsSchema.optional(),
+  connections: z.array(connectionConfigSchema).min(1),
+}).strict().superRefine((config, context) => {
   const choices = listConfiguredModels(config).map((choice) => choice.selector.toLowerCase());
   if (new Set(choices).size !== choices.length) {
     context.addIssue({ code: "custom", message: "model names conflict with generated connection selectors" });
+  }
+  for (const [connectionIndex, connection] of config.connections.entries()) {
+    for (const [modelIndex, model] of connection.models.entries()) {
+      const effort = model.reasoningEffort ?? config.defaults?.reasoningEffort ?? DEFAULT_REASONING_EFFORT;
+      const supported = model.supportedReasoningEfforts ?? REASONING_EFFORTS;
+      if (!supported.includes(effort)) {
+        context.addIssue({
+          code: "custom", path: ["connections", connectionIndex, "models", modelIndex, "reasoningEffort"],
+          message: `effective reasoning effort '${effort}' must be in supportedReasoningEfforts`,
+        });
+      }
+    }
   }
 });
 
@@ -39,6 +72,9 @@ export interface RuntimeModelConfig extends ConfiguredModelChoice {
   apiKey: string;
   baseUrl: string;
   reasoningSummary?: ReasoningSummaryMode;
+  reasoningEffort: ReasoningEffort;
+  supportedReasoningEfforts: readonly ReasoningEffort[];
+  contextWindow?: number;
 }
 
 export function resolveAppConfigPath(cwd: string = process.cwd()): string {
@@ -84,28 +120,32 @@ export function resolveRuntimeModelConfig(
     }
     throw new Error(selector ? `Unknown model: ${selector}. Choose a configured model.` : "No models are configured.");
   }
-  const connection = config[choice.connectionIndex]!;
+  const connection = config.connections[choice.connectionIndex]!;
+  const selected = connection.models.find((entry) => entry.id === choice.model)!;
+  const reasoningSummary = selected.reasoningSummary ?? config.defaults?.reasoningSummary ?? DEFAULT_REASONING_SUMMARY;
   return {
     ...choice,
     apiKey: connection.apiKey.trim(),
     baseUrl: connection.baseUrl,
-    reasoningSummary: connection.reasoningSummary === "off"
-      ? undefined : connection.reasoningSummary ?? DEFAULT_REASONING_SUMMARY,
+    reasoningSummary: reasoningSummary === "off" ? undefined : reasoningSummary,
+    reasoningEffort: selected.reasoningEffort ?? config.defaults?.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+    supportedReasoningEfforts: selected.supportedReasoningEfforts ?? REASONING_EFFORTS,
+    ...(selected.contextWindow !== undefined ? { contextWindow: selected.contextWindow } : {}),
   };
 }
 
-export function listConfiguredModels(config: ReadonlyArray<z.infer<typeof connectionConfigSchema>>): ConfiguredModelChoice[] {
+export function listConfiguredModels(config: { connections: ReadonlyArray<z.infer<typeof connectionConfigSchema>> }): ConfiguredModelChoice[] {
   const counts = new Map<string, number>();
-  for (const connection of config) {
+  for (const connection of config.connections) {
     for (const model of connection.models) {
-      const key = model.toLowerCase();
+      const key = model.id.toLowerCase();
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
-  return config.flatMap((connection, connectionIndex) => connection.models.map((model) => ({
+  return config.connections.flatMap((connection, connectionIndex) => connection.models.map((model) => ({
     connectionIndex,
-    model,
-    selector: counts.get(model.toLowerCase())! > 1 ? `${connectionIndex + 1}:${model}` : model,
+    model: model.id,
+    selector: counts.get(model.id.toLowerCase())! > 1 ? `${connectionIndex + 1}:${model.id}` : model.id,
   })));
 }
 

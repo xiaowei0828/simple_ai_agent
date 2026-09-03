@@ -33,6 +33,8 @@ export interface ModelOutputItem {
 
 export type ModelInputItem = ConversationMessage | ToolCallOutput | ModelOutputItem;
 export type ReasoningSummaryMode = "auto" | "concise" | "detailed";
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = typeof REASONING_EFFORTS[number];
 
 export type ModelStreamEvent =
   | { type: "output_text_delta"; delta: string }
@@ -49,9 +51,11 @@ export interface ModelRequest {
   input: string | ModelInputItem[];
   previousResponseId?: string;
   reasoningSummary?: ReasoningSummaryMode;
+  reasoningEffort?: ReasoningEffort;
   stream?: boolean;
   onStreamEvent?: ModelStreamEventHandler;
   tools: ToolDefinition[];
+  purpose?: "compaction";
 }
 
 export interface ModelResponse {
@@ -62,6 +66,27 @@ export interface ModelResponse {
   reasoningSummaryUnavailable?: boolean;
   toolCalls: ModelToolCall[];
   outputItems?: ModelOutputItem[];
+  usage?: Record<string, unknown>;
+  status?: string;
+  incompleteDetails?: { reason?: string };
+}
+
+export interface ContextUsage {
+  tokens: number;
+  historyLength: number;
+}
+
+export interface CompactionSettings {
+  contextWindow: number;
+  triggerTokens: number;
+  keepRecentTokens: number;
+}
+
+export interface CompactionResult {
+  summary: string;
+  replacementHistory: ModelInputItem[];
+  tokensBefore: number;
+  tokensAfter: number;
   usage?: Record<string, unknown>;
 }
 
@@ -91,6 +116,9 @@ export type AgentEvent =
   | { type: "tool_completed"; step: number; callId: string; toolName: string; result: unknown }
   | { type: "tool_failed"; step: number; callId: string; toolName: string; error: string }
   | { type: "tool_output"; step: number; output: ToolCallOutput }
+  | { type: "compaction_started"; step: number; reason: "manual" | "threshold"; tokensBefore: number }
+  | { type: "compaction_completed"; step: number; result: CompactionResult }
+  | { type: "compaction_failed"; step: number; error: string }
   | { type: "run_completed"; steps: number; output: string };
 
 export type AgentEventHandler = (event: AgentEvent) => void | Promise<void>;

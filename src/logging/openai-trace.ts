@@ -43,7 +43,9 @@ export interface OpenAIStreamTrace {
   event: unknown;
 }
 
-export type OpenAITraceEntry = OpenAIRequestTrace | OpenAIResponseTrace | OpenAIErrorTrace | OpenAIStreamTrace;
+export type OpenAITraceEntry = (OpenAIRequestTrace | OpenAIResponseTrace | OpenAIErrorTrace | OpenAIStreamTrace) & {
+  purpose?: "compaction";
+};
 
 export interface OpenAITraceSink {
   log(entry: OpenAITraceEntry): Promise<void>;

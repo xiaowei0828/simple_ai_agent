@@ -1,5 +1,5 @@
 import type { ModelResponse } from "../core/types.js";
-import { responseInputItems } from "../history/session-store.js";
+import { responseInputItems } from "../core/context-compaction.js";
 
 export interface ParsedTraceEntry {
   lineNumber: number;
@@ -21,18 +21,22 @@ export function projectSessionTrace(entries: ParsedTraceEntry[]): ParsedTraceEnt
   const steps = new Map<string, Step>();
   const tasks = new Map<string, string>();
   let model: unknown;
+  let reasoningEffort: unknown;
   let currentTurn = "";
   const stepFor = (entry: ParsedTraceEntry): Step => {
     const value = entry.value;
     const turnId = String(value.turnId ?? currentTurn);
     const stepNumber = Number(value.step) || 1;
-    const traceId = `${turnId}:${stepNumber}`;
+    const compacting = value.purpose === "compaction" || value.type === "session.compacted"
+      || String(value.type).startsWith("session.compaction_");
+    const traceId = `${turnId}:${compacting ? "compaction:" : ""}${stepNumber}`;
     let step = steps.get(traceId);
     if (!step) {
       step = {
         request: { lineNumber: entry.lineNumber, value: {
           type: "openai.request", traceId, timestamp: value.timestamp,
-          body: { model, input: stepNumber === 1 ? tasks.get(turnId) ?? "" : [] },
+          ...(compacting ? { purpose: "compaction" } : {}),
+          body: { model, ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), input: compacting ? "Summarize older context; retain recent messages." : stepNumber === 1 ? tasks.get(turnId) ?? "" : [] },
         } },
         outputs: [], rawResponse: false,
       };
@@ -43,13 +47,19 @@ export function projectSessionTrace(entries: ParsedTraceEntry[]): ParsedTraceEnt
   for (const entry of entries) {
     const value = entry.value;
     const type = value.type;
-    if (type === "session.created") { model = value.model; continue; }
+    if (type === "session.created") { model = value.model; reasoningEffort = value.reasoningEffort; continue; }
+    if (type === "session.reasoning_effort_changed") { reasoningEffort = value.reasoningEffort; continue; }
     if (type === "session.turn_started") {
       currentTurn = String(value.turnId);
       tasks.set(currentTurn, String(value.task));
       continue;
     }
     if (type === "session.renamed" || type === "openai.stream") continue;
+    if (type === "session.turn_failed") {
+      const turnId = String(value.turnId ?? currentTurn);
+      const stepNumber = Number(value.step) || 1;
+      if (!steps.has(`${turnId}:${stepNumber}`) && steps.get(`${turnId}:compaction:${stepNumber}`)?.error) continue;
+    }
     if (type === "session.turn_completed") {
       const turn = value.turn as { user: string; assistant: string; responseId?: string };
       const turnId = String(value.turnId ?? `imported-${entry.lineNumber}`);
@@ -75,6 +85,12 @@ export function projectSessionTrace(entries: ParsedTraceEntry[]): ParsedTraceEnt
       step.error = undefined;
     } else if (type === "openai.error") {
       step.error = { ...entry, value: { ...value, traceId, originalEntry: value } };
+    } else if (type === "session.compacted" && !step.rawResponse) {
+      step.response = { ...entry, value: {
+        type: "openai.response", traceId, timestamp: value.timestamp, purpose: "compaction",
+        body: { model, status: "completed", output: [], output_text: value.summary, usage: value.usage },
+      } };
+      step.error = undefined;
     } else if (type === "session.model_response" && !step.rawResponse) {
       const response = value.response as ModelResponse;
       step.response = { ...entry, value: {
@@ -85,7 +101,7 @@ export function projectSessionTrace(entries: ParsedTraceEntry[]): ParsedTraceEnt
       step.error = undefined;
     } else if (type === "session.tool_output") {
       step.outputs.push({ ...entry, value: { ...value, traceId } });
-    } else if (type === "session.turn_failed" && !step.error) {
+    } else if ((type === "session.turn_failed" || type === "session.compaction_failed") && !step.error) {
       step.error = { ...entry, value: {
         type: "openai.error", traceId, timestamp: value.timestamp,
         error: { name: "Error", message: value.error },

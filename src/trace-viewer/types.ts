@@ -32,6 +32,7 @@ export interface TraceToolCall {
 
 export interface TraceTurn {
   index: number;
+  purpose?: "compaction";
   traceId: string;
   startedAt?: string;
   completedAt?: string;

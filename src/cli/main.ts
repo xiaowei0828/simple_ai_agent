@@ -108,6 +108,7 @@ async function main(): Promise<void> {
       toolContext: { workspaceRoot },
       approvalPolicy,
       maxSteps: options.maxSteps,
+      contextWindow: (model) => resolveRuntimeModelConfig(appConfig, model).contextWindow,
       stream: options.stream,
       async onEvent(event) {
         await historyStore.recordAgentEvent(event);
@@ -119,6 +120,7 @@ async function main(): Promise<void> {
       agent: runner,
       initialModel: runtimeConfig.selector,
       availableModels: listConfiguredModels(appConfig).map((choice) => choice.selector),
+      reasoningConfig: (model) => resolveRuntimeModelConfig(appConfig, model),
       historyStore,
       async viewLatestTrace(conversationId) {
         const tracePath = conversationId ? historyStore.filePath(conversationId) : await findLatestTraceFile(traceDirectory);

@@ -2,14 +2,22 @@ import type {
   AgentEventHandler,
   AgentRunResult,
   ApprovalPolicy,
+  CompactionResult,
+  CompactionSettings,
+  ContextUsage,
   ModelAdapter,
   ModelInputItem,
   ModelResponse,
   ModelToolCall,
+  ReasoningEffort,
   ReasoningSummaryMode,
   ToolCallOutput,
 } from "./types.js";
 import type { ToolContext, ToolRegistry } from "../tools/types.js";
+import {
+  compactContext, contextInput, contextTokens, resolveCompactionSettings,
+  retainedHistoryStart, responseContextUsage, responseInputItems,
+} from "./context-compaction.js";
 
 export const DEFAULT_MAX_STEPS = 300;
 
@@ -224,14 +232,20 @@ export interface AgentRunnerOptions {
   maxSteps?: number;
   maxToolOutputChars?: number;
   reasoningSummary?: ReasoningSummaryMode;
+  reasoningEffort?: ReasoningEffort;
   stream?: boolean;
   onEvent?: AgentEventHandler;
+  contextWindow?: (model: string) => number | undefined;
 }
 
 export interface AgentRunOptions {
+  reasoningEffort?: ReasoningEffort;
   previousResponseId?: string;
   model?: string;
+  /** Local mirror of active history. With a live response ID, only the new input is sent. */
   history?: ModelInputItem[];
+  summary?: string;
+  contextUsage?: ContextUsage;
 }
 
 export class AgentLimitError extends Error {
@@ -270,18 +284,30 @@ export class AgentRunner {
     if (!taskText) {
       throw new Error("Task cannot be empty.");
     }
-    if (runOptions.previousResponseId && runOptions.history?.length) {
-      throw new Error("previousResponseId and history cannot be used together.");
-    }
-
     await this.#emit({ type: "run_started", task: taskText });
-    let input: string | ModelInputItem[] = runOptions.history?.length
-      ? [...runOptions.history, { role: "user", content: taskText }]
-      : taskText;
+    let history: ModelInputItem[] = [...runOptions.history ?? [], { role: "user", content: taskText }];
+    let summary = runOptions.summary;
+    let usage = runOptions.contextUsage;
+    let input: string | ModelInputItem[] = !runOptions.previousResponseId && (runOptions.history?.length || summary)
+      ? contextInput(history, summary) : taskText;
     let previousResponseId = runOptions.previousResponseId;
     const modelName = runOptions.model?.trim() || this.#options.modelName;
+    const settings = this.#settings(modelName);
+    const reasoningEffort = runOptions.reasoningEffort ?? this.#options.reasoningEffort;
+    if (settings && previousResponseId && !runOptions.history) {
+      throw new Error("Automatic compaction requires local history alongside a live response ID.");
+    }
 
     for (let step = 1; step <= this.#options.maxSteps; step += 1) {
+      if (settings && this.#contextTokens(history, summary, usage) >= settings.triggerTokens) {
+        const result = await this.#compact(modelName, history, summary, usage, settings, step, "threshold", reasoningEffort);
+        if (!result) throw new Error("Context exceeds the token budget, but no older complete message group can be summarized.");
+        history = result.replacementHistory;
+        summary = result.summary;
+        usage = undefined;
+        previousResponseId = undefined;
+        input = contextInput(history, summary);
+      }
       await this.#emit({ type: "model_requested", step, model: modelName });
       let response: ModelResponse;
       try {
@@ -291,6 +317,7 @@ export class AgentRunner {
           input,
           previousResponseId,
           reasoningSummary: this.#options.reasoningSummary,
+          reasoningEffort,
           stream: this.#options.stream,
           onStreamEvent: this.#options.stream
             ? async (event) => {
@@ -306,6 +333,8 @@ export class AgentRunner {
         throw error;
       }
       previousResponseId = response.id;
+      history.push(...responseInputItems(response));
+      usage = responseContextUsage(response, history.length) ?? usage;
       await this.#emit({ type: "model_response", step, response });
 
       if (response.toolCalls.length === 0) {
@@ -315,9 +344,48 @@ export class AgentRunner {
       }
 
       input = await this.#executeTools(response.toolCalls, step);
+      history.push(...input);
     }
 
     throw new AgentLimitError(this.#options.maxSteps);
+  }
+
+  async compact(options: AgentRunOptions, customInstructions?: string): Promise<CompactionResult | undefined> {
+    const model = options.model?.trim() || this.#options.modelName;
+    const settings = this.#settings(model);
+    if (!settings) throw new Error("Set this model's contextWindow in .config/config.json before compacting.");
+    return this.#compact(model, options.history ?? [], options.summary, options.contextUsage, settings, 0, "manual", options.reasoningEffort ?? this.#options.reasoningEffort, customInstructions);
+  }
+
+  #settings(model: string): CompactionSettings | undefined {
+    const contextWindow = this.#options.contextWindow?.(model);
+    return contextWindow === undefined ? undefined : resolveCompactionSettings(contextWindow);
+  }
+
+  #contextTokens(history: ModelInputItem[], summary?: string, usage?: ContextUsage): number {
+    return contextTokens(history, summary, this.#options.instructions, this.#options.tools.definitions(), usage);
+  }
+
+  async #compact(
+    model: string, history: ModelInputItem[], summary: string | undefined, usage: ContextUsage | undefined,
+    settings: CompactionSettings, step: number, reason: "manual" | "threshold", reasoningEffort?: ReasoningEffort, customInstructions?: string,
+  ): Promise<CompactionResult | undefined> {
+    if (retainedHistoryStart(history, settings.keepRecentTokens) === 0) return undefined;
+    const tokensBefore = this.#contextTokens(history, summary, usage);
+    await this.#emit({ type: "compaction_started", step, reason, tokensBefore });
+    try {
+      const result = await compactContext({
+        model: this.#options.model, modelName: model, history, summary, settings,
+        instructions: this.#options.instructions, tools: this.#options.tools.definitions(),
+        reasoningEffort,
+        customInstructions, tokensBefore,
+      });
+      if (result) await this.#emit({ type: "compaction_completed", step, result });
+      return result;
+    } catch (error) {
+      await this.#emit({ type: "compaction_failed", step, error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
   }
 
   async #executeTools(calls: ModelToolCall[], step: number): Promise<ToolCallOutput[]> {

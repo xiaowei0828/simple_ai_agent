@@ -193,10 +193,11 @@ describe("AgentRunner", () => {
     ]);
   });
 
-  it("rejects ambiguous continuation state", async () => {
+  it("keeps local history without duplicating it in response-ID requests", async () => {
     const root = await fixture();
+    const model = new ScriptedModel([{ id: "next", outputText: "done", toolCalls: [] }]);
     const runner = new AgentRunner({
-      model: new ScriptedModel([]),
+      model,
       modelName: "test-model",
       instructions: "test instructions",
       tools: createDefaultToolRegistry(),
@@ -204,10 +205,11 @@ describe("AgentRunner", () => {
       approvalPolicy: new AllowAllApprovalPolicy(),
     });
 
-    await expect(runner.run("Follow up.", {
+    await runner.run("Follow up.", {
       previousResponseId: "response-previous",
       history: [{ role: "user", content: "Earlier question." }],
-    })).rejects.toThrow("cannot be used together");
+    });
+    expect(model.requests[0]).toMatchObject({ previousResponseId: "response-previous", input: "Follow up." });
   });
 
   it("executes a tool call and sends its output to the next model turn", async () => {

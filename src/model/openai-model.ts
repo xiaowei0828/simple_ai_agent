@@ -69,6 +69,7 @@ export class OpenAIModel implements ModelAdapter {
   }
 
   async #respondOnce(request: ModelRequest): Promise<ModelResponse> {
+    const compacting = request.purpose === "compaction";
     const input = typeof request.input === "string"
       ? request.input
       : request.input as ResponseInputItem[];
@@ -78,12 +79,13 @@ export class OpenAIModel implements ModelAdapter {
       instructions: request.instructions,
       input,
       previous_response_id: request.previousResponseId,
-      reasoning: request.reasoningSummary
-        ? { summary: request.reasoningSummary }
+      reasoning: request.reasoningSummary || request.reasoningEffort
+        ? { summary: request.reasoningSummary, effort: request.reasoningEffort }
         : undefined,
       tools: request.tools as FunctionTool[],
-      parallel_tool_calls: this.#parallelToolCalls,
-      store: true,
+      tool_choice: compacting ? "none" : undefined,
+      parallel_tool_calls: compacting ? false : this.#parallelToolCalls,
+      store: !compacting,
     };
     const body = request.stream
       ? { ...nonStreamingBody, stream: true } satisfies ResponseCreateParamsStreaming
@@ -95,6 +97,7 @@ export class OpenAIModel implements ModelAdapter {
       traceId,
       endpoint: this.#endpoint,
       body,
+      purpose: request.purpose,
     });
 
     const startedAt = performance.now();
@@ -110,6 +113,7 @@ export class OpenAIModel implements ModelAdapter {
         traceId,
         durationMs: Math.round(performance.now() - startedAt),
         error: serializeError(error),
+        purpose: request.purpose,
       });
       throw error;
     }
@@ -127,12 +131,15 @@ export class OpenAIModel implements ModelAdapter {
         headers: safeResponseHeaders(result.response.headers),
       },
       body: result.data,
+      purpose: request.purpose,
     });
 
     const response = result.data;
 
     return {
       id: response.id,
+      status: response.status,
+      incompleteDetails: response.incomplete_details ?? undefined,
       outputText: response.output_text ?? extractOutputText(response),
       reasoningSummary: extractReasoningSummary(response),
       reasoningText: extractReasoningText(response),
@@ -157,7 +164,7 @@ export class OpenAIModel implements ModelAdapter {
 
     for await (const event of result.data) {
       await this.#traceSink?.log({
-        type: "openai.stream", timestamp: new Date().toISOString(), traceId, event,
+        type: "openai.stream", timestamp: new Date().toISOString(), traceId, event, purpose: request.purpose,
       });
       switch (event.type) {
         case "response.output_text.delta":
@@ -231,6 +238,7 @@ function isReasoningSummaryUnsupported(error: unknown): boolean {
     error: details.error,
   });
   return /reasoning/iu.test(description)
+    && !/effort/iu.test(description)
     && /summary|unsupported|not supported|unknown|unrecognized|invalid|extra/iu.test(description);
 }
 

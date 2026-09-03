@@ -81,6 +81,7 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
     }
     if (type === "openai.request") {
       const body = asObject(entry.value.body) ?? {};
+      turn.purpose = entry.value.purpose === "compaction" ? "compaction" : undefined;
       turn.startedAt = asString(entry.value.timestamp);
       turn.endpoint = asString(entry.value.endpoint);
       turn.requestModel = asString(body.model);
@@ -89,6 +90,9 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
       const displayInput = entry.value.sessionInput ?? body.input;
       turn.userInputs = extractUserInputs(displayInput);
       turn.returnedToolResults = extractToolResults(displayInput, turn.index);
+
+      // Summary requests have their own prompt and no tools; they don't change agent configuration.
+      if (turn.purpose === "compaction") continue;
 
       const instructions = asString(body.instructions) ?? "";
       const definitions = extractToolDefinitions(body.tools);

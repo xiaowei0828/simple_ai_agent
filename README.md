@@ -15,6 +15,7 @@
 - Markdown 文档目录：只注入路径和标题，需要时再读取正文
 - 本地 Skill 目录：在 8,000 字符预算内提供名称、描述和绝对路径；超过预算时通过完整索引搜索，再按需读取 `SKILL.md`
 - 会话过程默认写入 `.agent-runs/<会话 ID>.jsonl`，恢复历史和 Trace Viewer 共用同一文件；`--debug` 追加原始请求、响应、SSE 和异常详情
+- Pi 风格的历史压缩：独立请求总结较早的历史，保留近期完整消息；支持自动触发、`/compact` 和压缩检查点恢复
 - 默认通过 Responses API 事件流实时显示推理摘要和回答正文，使用 `--no-stream` 可关闭流式输出
 - 可替换的 `ModelAdapter`，测试使用假模型，不消耗 API 调用
 
@@ -36,10 +37,10 @@ flowchart LR
 
 核心循环位于 `src/core/agent-runner.ts`：
 
-1. 把任务、系统指令和工具 JSON Schema 发给模型。
+1. 检查上下文预算，需要时先压缩较早的历史，再把任务、系统指令和工具 JSON Schema 发给模型。
 2. 如果模型返回一个或多个 `function_call`，按顺序解析并用 Zod 校验参数。
 3. 每个工具调用先交给 `ApprovalPolicy`，批准后执行，再处理下一个调用。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
-4. 把结构化工具结果作为 `function_call_output` 发回模型。
+4. 把结构化工具结果作为 `function_call_output` 加入历史，检查预算后发回模型。
 5. 模型不再调用工具时结束；超过最大轮数则强制停止，默认上限为 300 轮。
 
 这个流程对应 OpenAI 官方的 [function calling 工具循环](https://developers.openai.com/api/docs/guides/function-calling)。
@@ -53,28 +54,46 @@ npm install
 npm run dev -- --workspace .
 ```
 
-启动前创建当前目录的 `.config/config.json`，启动时会从中加载连接设置。配置是一个数组，每项是一组 API key、地址和可用模型：
+启动前创建当前目录的 `.config/config.json`，启动时会从中加载连接设置。配置由公共默认值 `defaults` 和连接数组 `connections` 组成；每个连接包含 API key、地址和可用模型：
 
 ```json
-[
-  {
-    "apiKey": "your-ark-api-key",
-    "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
-    "models": ["deepseek-v4-flash", "glm-5.3"],
+{
+  "defaults": {
+    "reasoningEffort": "medium",
     "reasoningSummary": "auto"
   },
-  {
-    "apiKey": "your-other-api-key",
-    "baseUrl": "https://provider.example.com/v1",
-    "models": ["provider-model"],
-    "reasoningSummary": "off"
-  }
-]
+  "connections": [
+    {
+      "apiKey": "your-api-key",
+      "baseUrl": "https://provider.example.com/v1",
+      "models": [
+        {
+          "id": "model-a",
+          "contextWindow": 300000,
+          "supportedReasoningEfforts": ["low", "medium", "high"]
+        },
+        {
+          "id": "model-b",
+          "contextWindow": 128000,
+          "reasoningEffort": "high",
+          "supportedReasoningEfforts": ["high", "max"]
+        }
+      ]
+    }
+  ]
+}
 ```
 
-默认使用第一组配置的第一个模型。`/model` 会列出所有组的模型，使用 `/model <序号或模型名>` 选择模型时，会同时使用该组的 `apiKey`、`baseUrl` 和 `reasoningSummary`。同名模型通过配置编号区分，例如 `1:shared-model`、`2:shared-model`；也可以直接按 `/model` 列表中的序号选择。
+默认使用 `connections` 中第一个连接的第一个模型。`models` 中每项是模型对象，`id` 是发送给服务端的模型名。`defaults` 可省略，用于统一设置推理默认值；模型可以单独覆盖。上下文窗口和允许的推理档位保留在模型配置中，同一个 API 连接下可以不同。`/model` 列出所有连接的模型；同名模型通过配置编号区分，例如 `1:shared-model`、`2:shared-model`。
 
-每组的 `reasoningSummary` 控制是否请求并显示推理摘要，可选值为 `off`、`auto`、`concise` 或 `detailed`，省略时默认为 `auto`。
+- `contextWindow`：模型服务实际提供的上下文容量，单位为 token。配置后启用历史压缩；压缩策略使用代码默认值，无需填写 `compaction`。
+- `reasoningEffort`：推理强度，按“会话选择 → 模型配置 → `defaults` → 代码默认值 `medium`”取值，发送为 `reasoning.effort`。
+- `reasoningSummary`：是否请求推理摘要及其详略，支持 `off`、`auto`、`concise`、`detailed`，按“模型配置 → `defaults` → 代码默认值 `auto`”取值。`off` 只关闭推理摘要请求，不等于关闭推理。
+- `supportedReasoningEfforts`：该模型允许选择的档位，继承或覆盖后的默认档位必须在列表中，列表不能为空或重复。客户端识别 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略列表时开放这些档位。这是配置声明，不会自动探测服务端能力，应按对应模型服务支持的值填写。
+
+配置加载时校验每个模型的有效推理档位。例如公共默认是 `medium`，只支持 `high` 和 `max` 的模型就需要像上例一样显式配置 `reasoningEffort`；不支持的默认值会报告具体模型路径。
+
+普通请求和压缩请求使用当前会话选择的推理级别。`/reasoning` 显示当前档位及允许列表，`/reasoning high` 修改后续请求的推理强度。中等档位的正式名称是 `medium`，命令也接受 `/reasoning mid`。修改会保留对话上下文并写入会话记录，不会改写配置文件。恢复会话时沿用已保存的选择；若该档位已从配置列表移除，则提示并使用该模型默认值。`/model` 切换模型时使用新模型的默认档位，`/new` 保留当前档位。
 
 `.config/` 已被 Git 忽略，`apply_patch` 禁止修改其中的文件。命令行读取不受这层文件路径策略限制，应在审批时检查读取范围。
 
@@ -165,19 +184,24 @@ Host 验证 `run_command` 的工作目录仍在 workspace 内，并限制执行�
 
 当前进程连续处理同一会话时，成功响应的 `responseId` 会作为后续请求的 `previous_response_id`。这个续接 ID 只从当前运行的响应中取得。具体机制参考 OpenAI 官方的 [conversation state](https://developers.openai.com/api/docs/guides/conversation-state)。
 
+宿主同时维护本地有效上下文，用于计算预算和生成摘要。传入 `AgentRunner.run` 的 `history` 与当前有效 `previousResponseId` 可以同时存在：有续接 ID 时，请求只发送新增输入；恢复会话或压缩成功后清除 ID，下一次请求发送完整有效上下文。
+
 会话从第一条用户输入开始保存在工作区的 `.agent-runs/<会话 ID>.jsonl` 中，无需开启 `--debug`。用户输入、每次完整模型响应、工具结果和任务结束状态按发生顺序追加写入；重新打开同一会话后继续追加原文件。启动时可以输入历史序号或 ID 前缀继续，也可以输入 `0` 开启新对话。
 
 启动时选择历史会话或使用 `/resume`，都会从本地记录回放消息、工具调用、工具结果及模型返回的 reasoning 项，首次请求不携带旧 `previous_response_id`。日志中的 response ID 只用于排障，恢复不要求存在这个字段。恢复后输入“继续”即可继续任务；已完成工具不会由恢复逻辑重新执行，缺少结果的工具会被标记为执行结果未知，交给模型核实。请求失败时保留当前进度，下一次输入从本地上下文继续。
 
-每个会话包含标题、模型、时间和运行状态。默认标题取第一条用户消息的前 60 个字符，使用 `/rename` 可以修改。历史按工作区隔离。旧 `.agent-history/*.json` 会在列出历史时导入新目录，原文件保留；导入不会覆盖已存在的新会话。旧格式只含最终问答，无法补回当时未保存的工具过程。
+每个会话包含标题、模型、推理强度、时间和运行状态。默认标题取第一条用户消息的前 60 个字符，使用 `/rename` 可以修改。历史按工作区隔离。旧 `.agent-history/*.json` 会在列出历史时导入新目录，原文件保留；导入不会覆盖已存在的新会话。旧格式只含最终问答，无法补回当时未保存的工具过程。
 
 交互命令：
 
 - `/model`：显示当前模型以及 `.config/config.json` 所有连接中的可用模型
 - `/model <序号或名称>`：切换模型及其 API 连接，并开启新对话，例如 `/model 2` 或 `/model glm-5.3`
+- `/reasoning`：显示当前模型的推理强度及允许档位
+- `/reasoning <档位>`：修改当前会话的推理强度，例如 `/reasoning high`
 - `/history`：列出当前工作区保存的历史会话
 - `/resume <序号或 ID 前缀>`：切换到某一个历史会话
 - `/rename <标题>`：重命名当前历史会话
+- `/compact [关注重点]`：手动压缩当前会话的较早历史，例如 `/compact 保留尚未完成的修改和测试结果`
 - `/trace`：把当前或最近的 `.agent-runs/*.jsonl` 生成为 HTML，并用系统默认浏览器打开
 - `/new`：保留当前历史并让下一条消息开启独立对话
 - `/help`：显示命令帮助
@@ -188,9 +212,29 @@ Host 验证 `run_command` 的工作目录仍在 workspace 内，并限制执行�
 
 `.agent-runs/` 是会话历史与调试记录的统一目录，已被当前仓库的 Git 忽略。
 
+## 历史压缩
+
+完整会话记录持续追加到 JSONL；下一次请求使用的有效上下文由“最新摘要 + 近期完整历史”组成。压缩成功后追加 `session.compacted`，保存新摘要和保留历史的快照，原始记录不删除。恢复时顺序应用检查点，再追加之后的消息和工具结果；多次恢复不会把已摘要的旧消息重新加入上下文。
+
+每次普通模型请求前都会检查预算，包括工具执行完成后。优先结合服务返回的 token usage 与新增消息估算，并使用本地估算作为下限。本地估算包含 instructions、工具定义和有效历史，但不是精确 tokenizer。达到上下文窗口的 80% 时触发压缩，300K 配置对应约 `300000 × 0.8 = 240000` tokens。比例由 `src/core/context-compaction.ts` 中的 `COMPACTION_TRIGGER_RATIO` 定义。
+
+近期历史的保留目标在代码中设为 20,000 tokens；小窗口时取不超过窗口的四分之一。切分只能发生在用户消息之前，或完整模型响应及其工具结果之后；reasoning、同一批工具调用及结果不会拆开。最新的一组始终完整保留，可能超过目标值。之前已有摘要时，将“旧摘要 + 本次移出的历史”合并成一个新摘要。较长工具结果只在摘要输入中保留头尾，原始日志不变。
+
+摘要使用当前模型和 API 连接发起独立的普通请求，不携带 `previous_response_id`，不提供工具，并显式设置 `tool_choice: "none"`、`parallel_tool_calls: false`。历史包装为引用材料，在末尾要求只生成摘要，将未完成工作记录为后续步骤。摘要请求不启用流式输出，也不请求 reasoning summary，但使用当前会话的 `reasoningEffort`。
+
+摘要请求不传 `max_output_tokens`，由模型服务决定输出上限。返回的完整摘要直接用于构造下一次请求的上下文。宿主直接使用 `AgentRunner` 时，可通过构造选项设置默认 `reasoningEffort`，也可在 `run` / `compact` 的选项中覆盖本次推理级别，并通过 `contextWindow(model)` 提供对应模型的上下文窗口。
+
+只有摘要完整、上下文减少到预算内、检查点写入成功后，才替换内存上下文并清除续接 ID。服务若返回 `incomplete`，会记录具体原因、实际输出量和推理用量；`length` 或 `max_output_tokens` 会明确报告为输出超限，不会保存半截摘要。服务若仍返回工具调用，会报告工具名称并保留原历史。自动压缩无法完成时会停止当前任务并报告原因，可以通过 `/compact` 提前压缩。若只剩一组完整消息，或摘要请求自身超过窗口，则无法继续缩减。
+
+压缩请求独立显示为 Trace Viewer 中的“上下文压缩”步骤，不计入普通工具循环的 300 轮上限，也不会作为用户问答保存。`--debug` 仍只控制是否额外记录原始 API 数据。
+
 ## 会话记录与调试
 
 默认记录 `session.created`、`session.turn_started`、`session.model_requested`、`session.model_response`、`session.tool_output`、`session.turn_completed` / `session.turn_failed` 和重命名事件。工具结果在产生后立即保存，不必等待下一次 API 请求或整次任务完成。
+
+推理强度的修改记录为 `session.reasoning_effort_changed`，只更新会话设置，不加入模型历史或产生额外问答。
+
+压缩过程记录 `session.compaction_started`、`session.compacted` 或 `session.compaction_failed`；摘要 API 的 debug 事件带有 `purpose: "compaction"`，不会与同一步的普通任务请求混在一起。
 
 `/trace` 读取当前会话文件并生成 HTML；尚未选择会话时读取最近的日志。默认记录已经能够展示任务、模型输出、工具调用及其结果。恢复会话的上下文只使用完整的会话记录，不会把调试分片重复加入消息历史。
 
@@ -307,7 +351,7 @@ sed -n '1,120p' '/absolute/skills/code-review/references/checklist.md'
 
 引用资料、脚本和资产的相对路径均以 `SKILL.md` 所在目录为基准。使用技能绝对路径时，`run_command.cwd` 仍保持在 workspace 内。目录检索、技能读取和脚本执行均经过 `run_command` 的宿主审批。
 
-编写 Skill 时，将 `SKILL.md` 保持为简短的入口，包含触发条件、关键步骤、必要约束和参考资料路径；将详细规范、示例和不同任务分支拆到 `references/`。分段读取限制单次回传量，但读过的内容仍会留在会话上下文中，当前尚未实现会话历史的自动摘要或压缩。
+编写 Skill 时，将 `SKILL.md` 保持为简短的入口，包含触发条件、关键步骤、必要约束和参考资料路径；将详细规范、示例和不同任务分支拆到 `references/`。分段读取限制单次回传量，已读内容进入会话上下文；启用历史压缩后，较早读取的内容会随历史一起摘要，原文仍可按路径重新读取。
 
 其它 Host 使用 `createSkillCatalog(skills)` 创建目录，将返回的 `content` 传给 `buildAgentInstructions`，并在会话结束时调用 `dispose()` 清理索引。所有 Skill 根中的名称必须全局唯一，同名不会静默覆盖。机器公共目录可这样配置：
 
@@ -342,11 +386,12 @@ npm run build
 
 类型检查覆盖源码和测试，并检查未使用的局部变量、导入及参数。构建会先清理 `dist`，避免已删除模块继续留在产物中。
 
-测试覆盖工具调用回传、审批顺序与拒绝、轮数上限、路径校验、多文件补丁、模型连接切换、会话恢复、流式调试日志、项目指令、Markdown 目录和 Skill 发现。
+测试覆盖工具调用回传、审批顺序与拒绝、轮数上限、路径校验、多文件补丁、模型连接切换、会话恢复、历史压缩与检查点故障恢复、流式调试日志、项目指令、Markdown 目录和 Skill 发现。
 
 ## 代码导航
 
 - `src/core/agent-runner.ts`：Agent 状态机和工具循环
+- `src/core/context-compaction.ts`：上下文预算、完整消息分组和独立摘要请求
 - `src/cli/interactive-session.ts`：本地历史恢复、当前运行的请求续接和交互命令
 - `src/history/session-store.ts`：统一会话 JSONL、恢复上下文和旧历史导入
 - `src/logging/`：原始请求、响应、SSE 和异常事件类型
