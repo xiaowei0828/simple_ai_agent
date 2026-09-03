@@ -1,15 +1,10 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import OpenAI from "openai";
 import { describe, expect, it, vi } from "vitest";
-import { PreviousResponseUnavailableError } from "../src/core/errors.js";
 import type { ModelStreamEvent } from "../src/core/types.js";
-import { JsonlTraceLogger } from "../src/logging/jsonl-trace-logger.js";
 import type { OpenAITraceEntry } from "../src/logging/openai-trace.js";
 import { OpenAIModel, type OpenAIModelOptions } from "../src/model/openai-model.js";
 
-describe("raw OpenAI logging", () => {
+describe("OpenAIModel", () => {
   it("requires explicit credentials and endpoint even when SDK environment variables are set", () => {
     vi.stubEnv("OPENAI_API_KEY", "environment-fixture-key");
     vi.stubEnv("OPENAI_BASE_URL", "https://environment.test/v1");
@@ -22,37 +17,6 @@ describe("raw OpenAI logging", () => {
         .not.toThrow();
     } finally {
       vi.unstubAllEnvs();
-    }
-  });
-
-  it("writes complete JSONL entries to a private file", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-log-"));
-    const logger = await JsonlTraceLogger.create(path.join(root, ".agent-runs"));
-
-    await logger.log({
-      type: "openai.request",
-      timestamp: "2026-01-01T00:00:00.000Z",
-      traceId: "trace-1",
-      endpoint: "https://api.openai.com/v1/responses",
-      body: { model: "test-model", input: "hello" },
-    });
-    await logger.log({
-      type: "openai.response",
-      timestamp: "2026-01-01T00:00:01.000Z",
-      traceId: "trace-1",
-      requestId: "req-1",
-      durationMs: 1000,
-      http: { status: 200, statusText: "OK", headers: { "x-request-id": "req-1" } },
-      body: { id: "resp-1", output: [] },
-    });
-    await logger.close();
-
-    const lines = (await readFile(logger.filePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatchObject({ type: "openai.request", body: { input: "hello" } });
-    expect(lines[1]).toMatchObject({ type: "openai.response", requestId: "req-1" });
-    if (process.platform !== "win32") {
-      expect((await stat(logger.filePath)).mode & 0o777).toBe(0o600);
     }
   });
 
@@ -297,7 +261,9 @@ describe("raw OpenAI logging", () => {
       reasoningSummary: "Inspect the project.",
       reasoningText: "Read the files carefully.",
     });
-    expect(traces[1]).toMatchObject({
+    expect(traces.filter((entry) => entry.type === "openai.stream").map((entry) => entry.event))
+      .toEqual(streamEvents);
+    expect(traces.at(-1)).toMatchObject({
       type: "openai.response",
       requestId: "req-stream",
       body: { id: "resp-stream", usage: { total_tokens: 4 } },
@@ -528,28 +494,4 @@ describe("raw OpenAI logging", () => {
     expect(transmittedBodies[2]).not.toHaveProperty("reasoning");
   });
 
-  it("classifies an unavailable previous response for local replay", async () => {
-    const client = new OpenAI({
-      apiKey: "test-key",
-      baseURL: "https://example.test/v1",
-      fetch: async () => new Response(JSON.stringify({
-        error: {
-          message: "The previous_response_id was not found.",
-          type: "invalid_request_error",
-        },
-      }), {
-        status: 404,
-        headers: { "content-type": "application/json" },
-      }),
-    });
-    const model = new OpenAIModel({ client });
-
-    await expect(model.respond({
-      model: "test-model",
-      instructions: "test instructions",
-      input: "follow up",
-      previousResponseId: "response-old",
-      tools: [],
-    })).rejects.toBeInstanceOf(PreviousResponseUnavailableError);
-  });
 });

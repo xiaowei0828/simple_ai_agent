@@ -57,15 +57,8 @@ export async function runProcess(options: RunProcessOptions): Promise<RunProcess
 
   const result = await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
     (resolve, reject) => {
-      let settled = false;
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        reject(error);
-      });
+      child.once("error", reject);
       child.once("close", (exitCode, signal) => {
-        if (settled) return;
-        settled = true;
         resolve({ exitCode, signal });
       });
     },

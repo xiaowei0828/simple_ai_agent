@@ -1,12 +1,33 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { runInteractiveSession, type InteractiveAgent } from "../src/cli/interactive-session.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { runInteractiveSession, type InteractiveAgent, type InteractiveSessionOptions } from "../src/cli/interactive-session.js";
 import type { AgentRunOptions } from "../src/core/agent-runner.js";
-import { PreviousResponseUnavailableError } from "../src/core/errors.js";
 import type { AgentRunResult } from "../src/core/types.js";
-import { JsonConversationStore } from "../src/history/conversation-store.js";
+import { JsonlConversationStore } from "../src/history/session-store.js";
+
+const roots: string[] = [];
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function createStore(): Promise<JsonlConversationStore> {
+  const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
+  roots.push(root);
+  return new JsonlConversationStore(path.join(root, ".agent-runs"));
+}
+
+async function runSession(
+  options: Omit<InteractiveSessionOptions, "historyStore" | "initialModel">
+    & Partial<Pick<InteractiveSessionOptions, "historyStore" | "initialModel">>,
+): Promise<void> {
+  await runInteractiveSession({
+    ...options,
+    historyStore: options.historyStore ?? await createStore(),
+    initialModel: options.initialModel ?? "test-model",
+  });
+}
 
 class FakeInteractiveAgent implements InteractiveAgent {
   readonly calls: Array<{ task: string; options?: AgentRunOptions }> = [];
@@ -26,7 +47,7 @@ describe("runInteractiveSession", () => {
   it("waits for interactive input and exits at EOF without requesting the model", async () => {
     const agent = new FakeInteractiveAgent();
     const prompts: string[] = [];
-    await runInteractiveSession({
+    await runSession({
       agent,
       io: {
         async prompt(label) {
@@ -48,7 +69,7 @@ describe("runInteractiveSession", () => {
     const assistantOutputs: string[] = [];
     const statusOutputs: string[] = [];
 
-    await runInteractiveSession({
+    await runSession({
       agent,
       io: {
         async prompt() {
@@ -64,45 +85,14 @@ describe("runInteractiveSession", () => {
     });
 
     expect(agent.calls).toEqual([
-      { task: "first question", options: { previousResponseId: undefined } },
-      { task: "follow up", options: { previousResponseId: "response-1" } },
-      { task: "fresh question", options: { previousResponseId: undefined } },
+      { task: "first question", options: { previousResponseId: undefined, model: "test-model" } },
+      { task: "follow up", options: { previousResponseId: "response-1", model: "test-model" } },
+      { task: "fresh question", options: { previousResponseId: undefined, model: "test-model" } },
     ]);
     expect(assistantOutputs).toEqual(["answer-1", "answer-2", "answer-3"]);
     expect(statusOutputs.some((output) => output.includes("Started a new conversation"))).toBe(true);
     expect(statusOutputs.some((output) => output.includes("/help"))).toBe(true);
     expect(statusOutputs.some((output) => output.includes("Unknown command"))).toBe(true);
-  });
-
-  it("keeps the last successful conversation after a failed turn", async () => {
-    let call = 0;
-    const previousIds: Array<string | undefined> = [];
-    const agent: InteractiveAgent = {
-      async run(_task, options) {
-        call += 1;
-        previousIds.push(options?.previousResponseId);
-        if (call === 2) throw new Error("temporary failure");
-        return { output: "ok", steps: 1, responseId: `response-${call}` };
-      },
-    };
-    const inputs = ["first", "fails", "retry", "/exit"];
-    const statuses: string[] = [];
-
-    await runInteractiveSession({
-      agent,
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus(output) {
-          statuses.push(output);
-        },
-      },
-    });
-
-    expect(previousIds).toEqual([undefined, "response-1", "response-1"]);
-    expect(statuses.some((output) => output.includes("temporary failure"))).toBe(true);
   });
 
   it("lists configured models and switches by number or name", async () => {
@@ -119,7 +109,7 @@ describe("runInteractiveSession", () => {
     ];
     const statuses: string[] = [];
 
-    await runInteractiveSession({
+    await runSession({
       agent,
       initialModel: "model-a",
       availableModels: ["model-a", "model-b"],
@@ -150,7 +140,7 @@ describe("runInteractiveSession", () => {
     const statuses: string[] = [];
     let traceViews = 0;
 
-    await runInteractiveSession({
+    await runSession({
       agent,
       async viewLatestTrace() {
         traceViews += 1;
@@ -173,12 +163,11 @@ describe("runInteractiveSession", () => {
   });
 
   it("persists a conversation and resumes it in a later session", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
-    const store = new JsonConversationStore(path.join(root, ".agent-history"));
+    const store = await createStore();
     const firstAgent = new FakeInteractiveAgent();
     const firstInputs = ["first question", "/exit"];
 
-    await runInteractiveSession({
+    await runSession({
       agent: firstAgent,
       historyStore: store,
       initialModel: "test-model",
@@ -194,7 +183,7 @@ describe("runInteractiveSession", () => {
     const secondAgent = new FakeInteractiveAgent();
     const inputs = ["1", "follow up", "/exit"];
     const statuses: string[] = [];
-    await runInteractiveSession({
+    await runSession({
       agent: secondAgent,
       historyStore: store,
       initialModel: "another-model",
@@ -213,7 +202,13 @@ describe("runInteractiveSession", () => {
     expect(secondAgent.calls).toEqual([
       {
         task: "follow up",
-        options: { previousResponseId: "response-1", model: "test-model" },
+        options: {
+          previousResponseId: undefined, model: "test-model",
+          history: [
+            { role: "user", content: "first question" },
+            { role: "assistant", content: "answer-1" },
+          ],
+        },
       },
     ]);
     const conversations = await store.list();
@@ -222,83 +217,53 @@ describe("runInteractiveSession", () => {
     expect(statuses.some((output) => output.includes("Resumed conversation"))).toBe(true);
   });
 
-  it("replays the local transcript when the remote response is unavailable", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
-    const store = new JsonConversationStore(path.join(root, ".agent-history"));
-    const conversation = await store.create({
-      model: "test-model",
-      title: "Saved discussion",
-      firstTurn: {
-        user: "earlier question",
-        assistant: "earlier answer",
-        responseId: "response-old",
-        createdAt: "2026-08-26T01:00:00.000Z",
+  it.each(["startup", "command"] as const)("restores through %s without a saved response ID", async (entry) => {
+    const store = await createStore();
+    const conversation = await store.create({ model: "test-model", title: "Saved discussion" });
+    await store.appendTurn(conversation.id, {
+      user: "earlier question", assistant: "earlier answer", createdAt: "2026-08-26T01:00:00.000Z",
+    });
+    const agent = new FakeInteractiveAgent();
+    // Switching after a live response must discard that response's continuation ID.
+    const prefix = entry === "startup" ? [conversation.id] : ["0", "another task", `/resume ${conversation.id}`];
+    const inputs = [...prefix, "follow up", "again", "/exit"];
+    await runSession({
+      agent, historyStore: store,
+      io: { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus() {} },
+    });
+    const resumedIndex = entry === "startup" ? 0 : 1;
+    expect(agent.calls).toHaveLength(resumedIndex + 2);
+    expect(agent.calls[resumedIndex]).toEqual({
+      task: "follow up",
+      options: {
+        previousResponseId: undefined, model: "test-model",
+        history: [
+          { role: "user", content: "earlier question" },
+          { role: "assistant", content: "earlier answer" },
+        ],
       },
     });
-    const calls: Array<{ task: string; options?: AgentRunOptions }> = [];
-    const agent: InteractiveAgent = {
-      async run(task, options) {
-        calls.push({ task, options });
-        if (options?.previousResponseId) {
-          throw new PreviousResponseUnavailableError(options.previousResponseId);
-        }
-        return { output: "recovered answer", steps: 1, responseId: "response-new" };
-      },
-    };
-    const inputs = [conversation.id.slice(0, 8), "follow up", "/exit"];
-    const statuses: string[] = [];
-
-    await runInteractiveSession({
-      agent,
-      historyStore: store,
-      initialModel: "test-model",
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus(output) {
-          statuses.push(output);
-        },
-      },
+    expect(agent.calls[resumedIndex + 1]).toEqual({
+      task: "again", options: { previousResponseId: `response-${resumedIndex + 1}`, model: "test-model" },
     });
-
-    expect(calls).toEqual([
-      {
-        task: "follow up",
-        options: { previousResponseId: "response-old", model: "test-model" },
-      },
-      {
-        task: "follow up",
-        options: {
-          history: [
-            { role: "user", content: "earlier question" },
-            { role: "assistant", content: "earlier answer" },
-          ],
-          model: "test-model",
-        },
-      },
-    ]);
-    expect((await store.load(conversation.id)).lastResponseId).toBe("response-new");
-    expect(statuses.some((output) => output.includes("Replaying"))).toBe(true);
+    expect((await store.load(conversation.id)).turns).toHaveLength(3);
   });
 
-  it("does not advance persisted history after a failed turn", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
-    const store = new JsonConversationStore(path.join(root, ".agent-history"));
+  it("records the failed task while preserving completed turns", async () => {
+    const store = await createStore();
     const conversation = await store.create({
       model: "test-model",
       title: "Saved discussion",
-      firstTurn: {
-        user: "earlier question",
-        assistant: "earlier answer",
-        responseId: "response-old",
-        createdAt: "2026-08-26T01:00:00.000Z",
-      },
+    });
+    await store.appendTurn(conversation.id, {
+      user: "earlier question",
+      assistant: "earlier answer",
+      responseId: "response-old",
+      createdAt: "2026-08-26T01:00:00.000Z",
     });
     const inputs = ["1", "failing follow up", "/exit"];
 
-    await runInteractiveSession({
+    await runSession({
       agent: {
         async run() {
           throw new Error("temporary failure");
@@ -316,27 +281,29 @@ describe("runInteractiveSession", () => {
     });
 
     const persisted = await store.load(conversation.id);
-    expect(persisted.lastResponseId).toBe("response-old");
+    expect(persisted.turns[0]?.responseId).toBe("response-old");
     expect(persisted.turns).toHaveLength(1);
+    expect(persisted.status).toBe("failed");
+    expect(persisted.pendingTask).toBe("failing follow up");
+    expect(persisted.context.at(-1)).toEqual({ role: "user", content: "failing follow up" });
   });
 
   it("lists and renames the current saved conversation", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
-    const store = new JsonConversationStore(path.join(root, ".agent-history"));
+    const store = await createStore();
     const conversation = await store.create({
       model: "test-model",
       title: "Old title",
-      firstTurn: {
-        user: "question",
-        assistant: "answer",
-        responseId: "response-old",
-        createdAt: "2026-08-26T01:00:00.000Z",
-      },
+    });
+    await store.appendTurn(conversation.id, {
+      user: "question",
+      assistant: "answer",
+      responseId: "response-old",
+      createdAt: "2026-08-26T01:00:00.000Z",
     });
     const inputs = ["1", "/rename New title", "/history", "/exit"];
     const statuses: string[] = [];
 
-    await runInteractiveSession({
+    await runSession({
       agent: new FakeInteractiveAgent(),
       historyStore: store,
       initialModel: "test-model",

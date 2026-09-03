@@ -1,4 +1,4 @@
-export type ToolRisk = "read" | "write" | "execute";
+export type ToolRisk = "write" | "execute";
 
 export interface ToolDefinition {
   type: "function";
@@ -25,7 +25,13 @@ export interface ConversationMessage {
   content: string;
 }
 
-export type ModelInputItem = ConversationMessage | ToolCallOutput;
+/** Preserve provider output items (including reasoning) when replaying locally. */
+export interface ModelOutputItem {
+  type: string;
+  [key: string]: unknown;
+}
+
+export type ModelInputItem = ConversationMessage | ToolCallOutput | ModelOutputItem;
 export type ReasoningSummaryMode = "auto" | "concise" | "detailed";
 
 export type ModelStreamEvent =
@@ -55,6 +61,8 @@ export interface ModelResponse {
   reasoningText?: string;
   reasoningSummaryUnavailable?: boolean;
   toolCalls: ModelToolCall[];
+  outputItems?: ModelOutputItem[];
+  usage?: Record<string, unknown>;
 }
 
 export interface ModelAdapter {
@@ -73,6 +81,7 @@ export interface ApprovalPolicy {
 
 export type AgentEvent =
   | { type: "run_started"; task: string }
+  | { type: "model_requested"; step: number; model: string }
   | { type: "model_output_delta"; step: number; delta: string }
   | { type: "model_reasoning_delta"; step: number; delta: string }
   | { type: "model_response_failed"; step: number }
@@ -81,6 +90,7 @@ export type AgentEvent =
   | { type: "approval_requested"; step: number; request: ApprovalRequest }
   | { type: "tool_completed"; step: number; callId: string; toolName: string; result: unknown }
   | { type: "tool_failed"; step: number; callId: string; toolName: string; error: string }
+  | { type: "tool_output"; step: number; output: ToolCallOutput }
   | { type: "run_completed"; steps: number; output: string };
 
 export type AgentEventHandler = (event: AgentEvent) => void | Promise<void>;

@@ -257,11 +257,10 @@ function renderEmptyState(): string {
 function summarizeArguments(value: unknown): string {
   if (typeof value === "string") return truncate(value, 180);
   if (!isRecord(value)) return prettyJson(value);
-  const preferredKeys = ["path", "query", "task", "name", "maxResults", "lineStart", "lineEnd"];
-  const entries = [...preferredKeys, ...Object.keys(value)]
-    .filter((key, index, keys) => keys.indexOf(key) === index && value[key] !== undefined)
+  const entries = Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
     .slice(0, 4)
-    .map((key) => `${key}: ${formatInline(value[key])}`);
+    .map(([key, entry]) => `${key}: ${formatInline(entry)}`);
   return entries.join(" · ") || "无参数";
 }
 
@@ -273,22 +272,6 @@ function summarizeToolResult(result: TraceToolResult): string {
 
   const envelope = isRecord(result.parsedOutput) ? result.parsedOutput : undefined;
   const value = envelope && "result" in envelope ? envelope.result : result.parsedOutput;
-  if (isRecord(value) && Array.isArray(value.entries)) {
-    return `返回 ${formatNumber(value.entries.length)} 个目录项${value.truncated === true ? "，列表已截断" : ""}`;
-  }
-  if (isRecord(value) && Array.isArray(value.directories) && Array.isArray(value.files)) {
-    return `返回 ${formatNumber(value.directories.length)} 个目录、${formatNumber(value.files.length)} 个文件${value.truncated === true ? "，列表已截断" : ""}`;
-  }
-  if (isRecord(value) && Array.isArray(value.files)) {
-    return `返回 ${formatNumber(value.files.length)} 个文件${value.truncated === true ? "，列表已截断" : ""}`;
-  }
-  if (isRecord(value) && Array.isArray(value.matches)) {
-    return `返回 ${formatNumber(value.matches.length)} 个匹配项`;
-  }
-  if (isRecord(value) && typeof value.content === "string") {
-    return `读取 ${formatNumber(value.content.split(/\r?\n/u).length)} 行、${formatNumber(value.content.length)} 字符`;
-  }
-  if (typeof value === "string") return truncate(value, 240);
   return truncate(prettyJson(value), 240);
 }
 

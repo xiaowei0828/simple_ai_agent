@@ -7,7 +7,7 @@ import { runInteractiveSession } from "../src/cli/interactive-session.js";
 import { listConfiguredModels, type AppConfig, type RuntimeModelConfig } from "../src/config/app-config.js";
 import { AgentRunner } from "../src/core/agent-runner.js";
 import type { ModelRequest } from "../src/core/types.js";
-import { JsonConversationStore } from "../src/history/conversation-store.js";
+import { JsonlConversationStore } from "../src/history/session-store.js";
 import { ConfiguredModel } from "../src/model/configured-model.js";
 import { OpenAIModel } from "../src/model/openai-model.js";
 import { DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
@@ -54,7 +54,7 @@ describe("ConfiguredModel", () => {
   it("routes interactive switches and resumed history while keeping response chains within a connection", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-agent-connections-"));
     try {
-      const store = new JsonConversationStore(path.join(root, ".agent-history"));
+      const store = new JsonlConversationStore(path.join(root, ".agent-runs"));
       const clients: RuntimeModelConfig[] = [];
       const requests: Array<{ connection: number; request: ModelRequest }> = [];
       const model = new ConfiguredModel(config, (connection) => {
@@ -69,6 +69,7 @@ describe("ConfiguredModel", () => {
       const runner = new AgentRunner({
         model, modelName: "1:shared", instructions: "test", tools: createDefaultToolRegistry(),
         toolContext: { workspaceRoot: root }, approvalPolicy: new DenyAllApprovalPolicy(),
+        onEvent: (event) => store.recordAgentEvent(event),
       });
       const inputs = ["first", "follow up", "/model 2", "second", "/model other", "third", "/exit"];
       await runInteractiveSession({
@@ -89,7 +90,14 @@ describe("ConfiguredModel", () => {
         availableModels: listConfiguredModels(config).map((choice) => choice.selector),
         io: { async prompt() { return resume.shift(); }, writeAssistant() {}, writeStatus() {} },
       });
-      expect(requests.at(-1)).toMatchObject({ connection: 1, request: { model: "shared", previousResponseId: "response-3" } });
+      expect(requests.at(-1)).toMatchObject({ connection: 1, request: {
+        model: "shared", previousResponseId: undefined,
+        input: [
+          { role: "user", content: "second" },
+          { role: "assistant", content: "ok" },
+          { role: "user", content: "resumed" },
+        ],
+      } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -6,13 +6,9 @@ import type {
   TraceTurn,
   TraceUsage,
 } from "./types.js";
+import { projectSessionTrace, type ParsedTraceEntry } from "./session-trace.js";
 
 type JsonObject = Record<string, unknown>;
-
-interface ParsedEntry {
-  lineNumber: number;
-  value: JsonObject;
-}
 
 interface ComparableConfig {
   endpoint?: string;
@@ -33,14 +29,13 @@ const EMPTY_USAGE: TraceUsage = {
 
 export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"): TraceReport {
   const warnings: string[] = [];
-  const entries = parseEntries(jsonl, warnings);
+  const entries = projectSessionTrace(parseEntries(jsonl, warnings));
   const turnByTraceId = new Map<string, TraceTurn>();
   const turns: TraceTurn[] = [];
 
   let firstInstructions = "";
   let firstTools: TraceToolDefinition[] = [];
   let firstEndpoint: string | undefined;
-  let previousConfigKey: string | undefined;
   let previousConfigValue: ComparableConfig | undefined;
   let store: boolean | undefined;
   let parallelToolCalls: boolean | undefined;
@@ -80,21 +75,25 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
     }
 
     const turn = getTurn(traceId);
+    if (type === "session.tool_output") {
+      turn.returnedToolResults.push(...extractToolResults([entry.value.output], turn.index));
+      continue;
+    }
     if (type === "openai.request") {
       const body = asObject(entry.value.body) ?? {};
       turn.startedAt = asString(entry.value.timestamp);
       turn.endpoint = asString(entry.value.endpoint);
       turn.requestModel = asString(body.model);
       turn.previousResponseId = asString(body.previous_response_id);
-      turn.rawRequest = entry.value;
-      turn.userInputs = extractUserInputs(body.input);
-      turn.returnedToolResults = extractToolResults(body.input, turn.index);
+      turn.rawRequest = asObject(entry.value.originalEntry) ?? entry.value;
+      const displayInput = entry.value.sessionInput ?? body.input;
+      turn.userInputs = extractUserInputs(displayInput);
+      turn.returnedToolResults = extractToolResults(displayInput, turn.index);
 
       const instructions = asString(body.instructions) ?? "";
       const definitions = extractToolDefinitions(body.tools);
-      const instructionKey = instructions;
       const toolKey = stableStringify(body.tools ?? []);
-      instructionVariants.add(instructionKey);
+      instructionVariants.add(instructions);
       toolVariants.add(toolKey);
 
       if (firstInstructions === "" && instructions !== "") firstInstructions = instructions;
@@ -115,18 +114,9 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
         parallelToolCalls:
           typeof body.parallel_tool_calls === "boolean" ? body.parallel_tool_calls : undefined,
       };
-      const configKey = stableStringify({
-        endpoint: turn.endpoint,
-        model: turn.requestModel,
-        instructions,
-        tools: body.tools ?? [],
-        store: body.store,
-        parallelToolCalls: body.parallel_tool_calls,
-      });
-      if (previousConfigValue && previousConfigKey !== configKey) {
+      if (previousConfigValue) {
         turn.configChanges = describeConfigChanges(previousConfigValue, currentConfig);
       }
-      previousConfigKey = configKey;
       previousConfigValue = currentConfig;
       continue;
     }
@@ -136,7 +126,7 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
       turn.completedAt = asString(entry.value.timestamp);
       turn.requestId = asString(entry.value.requestId) ?? null;
       turn.durationMs = asNumber(entry.value.durationMs);
-      turn.rawResponse = entry.value;
+      turn.rawResponse = asObject(entry.value.originalEntry) ?? entry.value;
       turn.responseId = asString(body.id);
       turn.responseModel = asString(body.model);
       turn.status = asString(body.status);
@@ -154,7 +144,7 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
       const error = asObject(entry.value.error) ?? {};
       turn.completedAt = asString(entry.value.timestamp);
       turn.durationMs = asNumber(entry.value.durationMs);
-      turn.rawError = entry.value;
+      turn.rawError = asObject(entry.value.originalEntry) ?? entry.value;
       turn.error = {
         name: asString(error.name) ?? "Error",
         message: asString(error.message) ?? "未知模型请求错误",
@@ -189,8 +179,8 @@ export function parseOpenAITraceJsonl(jsonl: string, sourceName = "OpenAI trace"
   };
 }
 
-function parseEntries(jsonl: string, warnings: string[]): ParsedEntry[] {
-  const entries: ParsedEntry[] = [];
+function parseEntries(jsonl: string, warnings: string[]): ParsedTraceEntry[] {
+  const entries: ParsedTraceEntry[] = [];
   for (const [index, line] of jsonl.split(/\r?\n/u).entries()) {
     if (line.trim() === "") continue;
     try {

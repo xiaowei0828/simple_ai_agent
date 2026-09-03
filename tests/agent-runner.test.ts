@@ -250,6 +250,42 @@ describe("AgentRunner", () => {
     expect(parsedOutput).not.toHaveProperty("truncated");
   });
 
+  it("approves, executes, and saves each tool result before starting the next tool", async () => {
+    const events: string[] = [];
+    const model = new ScriptedModel([
+      { id: "tools", outputText: "", toolCalls: [
+        { callId: "a", name: "write", arguments: "{}" },
+        { callId: "b", name: "execute", arguments: "{}" },
+      ] },
+      { id: "done", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model, modelName: "test", instructions: "test",
+      toolContext: { workspaceRoot: process.cwd() },
+      tools: new ToolRegistry((["write", "execute"] as const).map((risk) => ({
+        risk,
+        definition: { type: "function", name: risk, description: "fixture", parameters: {}, strict: false },
+        parse: () => ({}),
+        async execute() { events.push(`execute:${risk}`); return risk; },
+      }))),
+      approvalPolicy: {
+        async approve(request) { events.push(`approve:${request.toolName}`); return true; },
+      },
+      async onEvent(event) {
+        if (event.type === "tool_output") {
+          await Promise.resolve();
+          events.push(`saved:${event.output.call_id}`);
+        }
+      },
+    });
+    await runner.run("Keep tool operations ordered.");
+    expect(events).toEqual([
+      "approve:write", "execute:write", "saved:a",
+      "approve:execute", "execute:execute", "saved:b",
+    ]);
+    expect(functionCallOutputs(model.requests[1]).map((output) => output.call_id)).toEqual(["a", "b"]);
+  });
+
   it("keeps truncated success and error outputs within the limit as valid JSON", async () => {
     const root = await fixture();
     const tools = new ToolRegistry([{
@@ -260,7 +296,7 @@ describe("AgentRunner", () => {
         parameters: { type: "object" },
         strict: true,
       },
-      risk: "read",
+      risk: "execute",
       parse(input: unknown) {
         return input as { fail: boolean };
       },

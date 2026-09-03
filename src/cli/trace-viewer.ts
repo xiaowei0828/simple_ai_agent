@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 
-import path from "node:path";
-import { generateTraceReport, replaceExtension } from "../trace-viewer/generate-report.js";
+import { generateTraceReport } from "../trace-viewer/generate-report.js";
 
 interface CliOptions {
   inputPath: string;
-  outputPath: string;
+  outputPath?: string;
 }
 
 async function main(): Promise<void> {
@@ -13,8 +12,8 @@ async function main(): Promise<void> {
   if (!options) return;
 
   const { outputPath, report } = await generateTraceReport(
-    path.resolve(options.inputPath),
-    path.resolve(options.outputPath),
+    options.inputPath,
+    options.outputPath,
   );
 
   console.log(`Trace report: ${outputPath}`);
@@ -58,7 +57,7 @@ function parseArguments(args: string[]): CliOptions | undefined {
 
   return {
     inputPath,
-    outputPath: outputPath ?? replaceExtension(inputPath, ".html"),
+    outputPath,
   };
 }
 

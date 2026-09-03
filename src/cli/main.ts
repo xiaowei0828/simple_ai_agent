@@ -21,8 +21,7 @@ import { discoverMarkdownDocuments } from "../context/document-catalog.js";
 import { loadProjectInstructions } from "../context/instruction-loader.js";
 import { discoverSkills } from "../context/skill-registry.js";
 import { createSkillCatalog, type SkillCatalog } from "../context/skill-catalog.js";
-import { JsonlTraceLogger } from "../logging/jsonl-trace-logger.js";
-import { JsonConversationStore } from "../history/conversation-store.js";
+import { JsonlConversationStore } from "../history/session-store.js";
 import { OpenAIModel } from "../model/openai-model.js";
 import { ConfiguredModel } from "../model/configured-model.js";
 import { generateTraceReport } from "../trace-viewer/generate-report.js";
@@ -64,18 +63,13 @@ async function main(): Promise<void> {
     `agent: loaded ${projectInstructions.files.length} instruction file(s), indexed ${documents.length} doc(s), discovered ${skills.length} skill(s)\n`,
   );
 
-  const traceLogger = options.debug
-    ? await JsonlTraceLogger.create(path.join(workspaceRoot, ".agent-runs"))
-    : undefined;
   const traceDirectory = path.join(workspaceRoot, ".agent-runs");
-  const historyStore = new JsonConversationStore(path.join(workspaceRoot, ".agent-history"), {
+  const historyStore = new JsonlConversationStore(traceDirectory, {
+    legacyDirectory: path.join(workspaceRoot, ".agent-history"),
     onWarning(message) {
       process.stderr.write(`agent: ${message}\n`);
     },
   });
-  if (traceLogger) {
-    process.stderr.write(`agent: raw OpenAI log: ${traceLogger.filePath}\n`);
-  }
 
   const logEvent = createConsoleEventLogger({
     stream: options.stream,
@@ -106,7 +100,7 @@ async function main(): Promise<void> {
       model: new ConfiguredModel(appConfig, (connection) => new OpenAIModel({
         apiKey: connection.apiKey,
         baseURL: connection.baseUrl,
-        traceSink: traceLogger,
+        traceSink: options.debug ? historyStore : undefined,
       })),
       modelName: runtimeConfig.selector,
       instructions: buildAgentInstructions(projectInstructions, skillCatalog.content, documents),
@@ -115,7 +109,10 @@ async function main(): Promise<void> {
       approvalPolicy,
       maxSteps: options.maxSteps,
       stream: options.stream,
-      onEvent: logEvent,
+      async onEvent(event) {
+        await historyStore.recordAgentEvent(event);
+        await logEvent(event);
+      },
     });
 
     await runInteractiveSession({
@@ -123,11 +120,10 @@ async function main(): Promise<void> {
       initialModel: runtimeConfig.selector,
       availableModels: listConfiguredModels(appConfig).map((choice) => choice.selector),
       historyStore,
-      async viewLatestTrace() {
-        await traceLogger?.flush();
-        const tracePath = traceLogger?.filePath ?? await findLatestTraceFile(traceDirectory);
+      async viewLatestTrace(conversationId) {
+        const tracePath = conversationId ? historyStore.filePath(conversationId) : await findLatestTraceFile(traceDirectory);
         if (!tracePath) {
-          throw new Error("No trace log found. Start the agent with --debug to record interactions.");
+          throw new Error("No session log found. Enter a task to start a conversation.");
         }
         const generated = await generateTraceReport(tracePath);
         await openInDefaultBrowser(generated.outputPath);
@@ -153,11 +149,7 @@ async function main(): Promise<void> {
     });
   } finally {
     readline.close();
-    try {
-      await traceLogger?.close();
-    } finally {
-      await skillCatalog?.dispose();
-    }
+    await skillCatalog?.dispose();
   }
 }
 

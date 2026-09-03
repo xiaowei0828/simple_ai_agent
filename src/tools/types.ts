@@ -7,8 +7,6 @@ export interface ToolContext {
 export interface AgentTool<TInput = unknown> {
   definition: ToolDefinition;
   risk: ToolRisk;
-  /** Opt a read-only, reentrant tool into parallel batches; omission stays sequential. */
-  executionMode?: "parallel" | "sequential";
   parse(input: unknown): TInput;
   execute(input: TInput, context: ToolContext): Promise<unknown>;
 }

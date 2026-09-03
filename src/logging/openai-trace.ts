@@ -31,10 +31,19 @@ export interface OpenAIErrorTrace {
     status?: number;
     requestId?: string | null;
     body?: unknown;
+    cause?: { name: string; message: string; code?: unknown };
+    stack?: string;
   };
 }
 
-export type OpenAITraceEntry = OpenAIRequestTrace | OpenAIResponseTrace | OpenAIErrorTrace;
+export interface OpenAIStreamTrace {
+  type: "openai.stream";
+  timestamp: string;
+  traceId: string;
+  event: unknown;
+}
+
+export type OpenAITraceEntry = OpenAIRequestTrace | OpenAIResponseTrace | OpenAIErrorTrace | OpenAIStreamTrace;
 
 export interface OpenAITraceSink {
   log(entry: OpenAITraceEntry): Promise<void>;

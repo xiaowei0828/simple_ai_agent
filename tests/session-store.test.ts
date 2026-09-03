@@ -4,14 +4,14 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createConversationTitle,
-  JsonConversationStore,
-} from "../src/history/conversation-store.js";
+  JsonlConversationStore,
+} from "../src/history/session-store.js";
 
-describe("JsonConversationStore", () => {
+describe("JsonlConversationStore", () => {
   it("creates, updates, renames, and lists conversations", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-history-"));
-    const historyDirectory = path.join(root, ".agent-history");
-    const store = new JsonConversationStore(historyDirectory);
+    const historyDirectory = path.join(root, ".agent-runs");
+    const store = new JsonlConversationStore(historyDirectory);
     const firstTurn = {
       user: "first question",
       assistant: "first answer",
@@ -22,8 +22,8 @@ describe("JsonConversationStore", () => {
     const created = await store.create({
       model: "test-model",
       title: "First question",
-      firstTurn,
     });
+    await store.appendTurn(created.id, firstTurn);
     const appended = await store.appendTurn(created.id, {
       user: "follow up",
       assistant: "second answer",
@@ -32,12 +32,11 @@ describe("JsonConversationStore", () => {
     });
     const renamed = await store.rename(created.id, "Useful discussion");
 
-    expect(appended.lastResponseId).toBe("response-2");
+    expect(appended.turns.at(-1)?.responseId).toBe("response-2");
     expect(appended.turns).toHaveLength(2);
     expect(renamed.title).toBe("Useful discussion");
     expect(await store.load(created.id)).toMatchObject({
       title: "Useful discussion",
-      lastResponseId: "response-2",
       turns: [firstTurn, { responseId: "response-2" }],
     });
     expect(await store.list()).toEqual([
@@ -49,16 +48,16 @@ describe("JsonConversationStore", () => {
       }),
     ]);
     if (process.platform !== "win32") {
-      expect((await stat(path.join(historyDirectory, `${created.id}.json`))).mode & 0o777)
+      expect((await stat(path.join(historyDirectory, `${created.id}.jsonl`))).mode & 0o777)
         .toBe(0o600);
     }
   });
 
   it("skips invalid history files while listing", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-history-"));
-    const historyDirectory = path.join(root, ".agent-history");
+    const historyDirectory = path.join(root, ".agent-runs");
     const warnings: string[] = [];
-    const store = new JsonConversationStore(historyDirectory, {
+    const store = new JsonlConversationStore(historyDirectory, {
       onWarning(message) {
         warnings.push(message);
       },
@@ -66,18 +65,12 @@ describe("JsonConversationStore", () => {
     await store.create({
       model: "test-model",
       title: "Valid",
-      firstTurn: {
-        user: "question",
-        assistant: "answer",
-        responseId: "response-1",
-        createdAt: "2026-08-26T01:00:00.000Z",
-      },
     });
-    await writeFile(path.join(historyDirectory, "broken.json"), "{", "utf8");
+    await writeFile(path.join(historyDirectory, "00000000-0000-4000-8000-000000000000.jsonl"), "{", "utf8");
 
     expect(await store.list()).toHaveLength(1);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("broken.json");
+    expect(warnings[0]).toContain("00000000-0000-4000-8000-000000000000.jsonl");
   });
 
   it("builds a compact title from the first user message", () => {

@@ -7,15 +7,9 @@ import { generateTraceReport } from "../src/trace-viewer/generate-report.js";
 import { findLatestTraceFile } from "../src/trace-viewer/latest-trace.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { renderTraceReportHtml } from "../src/trace-viewer/render-html.js";
+import { createRunCommandTool } from "../src/tools/run-command.js";
 
-const tools = [
-  {
-    type: "function",
-    name: "read_file",
-    description: "Read one file.",
-    parameters: { type: "object", properties: { path: { type: "string" } } },
-  },
-];
+const tools = [createRunCommandTool().definition];
 
 describe("trace viewer", () => {
   it("normalizes repeated request fields and pairs tool results with calls", () => {
@@ -47,8 +41,8 @@ describe("trace viewer", () => {
             {
               type: "function_call",
               call_id: "call-1",
-              name: "read_file",
-              arguments: JSON.stringify({ path: "src/index.ts" }),
+              name: "run_command",
+              arguments: JSON.stringify({ command: "cat src/index.ts", cwd: ".", timeoutMs: 10_000 }),
             },
           ],
           usage: {
@@ -73,7 +67,7 @@ describe("trace viewer", () => {
             {
               type: "function_call_output",
               call_id: "call-1",
-              output: JSON.stringify({ ok: true, result: { content: "export const value = 42;" } }),
+              output: JSON.stringify({ ok: true, result: { output: "export const value = 42;", exitCode: 0 } }),
             },
           ],
         },
@@ -112,7 +106,7 @@ describe("trace viewer", () => {
 
     const html = renderTraceReportHtml(report);
     expect(html).toContain("用户输入");
-    expect(html).toContain("read_file");
+    expect(html).toContain("run_command");
     expect(html).toContain("最终回答");
     expect(html).toContain("模型思考 / reasoning text");
     expect(html).toContain("First inspect the source tree.");

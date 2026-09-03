@@ -4,8 +4,8 @@
 
 ## 它实现了什么
 
-- Responses API 的多轮工具调用循环，并通过 `previous_response_id` 延续交互式会话
-- 默认启用 `parallel_tool_calls`，允许模型在一轮中批量返回多个独立工具调用；Host 顺序完成参数校验和审批，纯只读批次并发执行，包含写入或命令的批次按模型顺序执行
+- Responses API 的多轮工具调用循环；历史会话从本地记录恢复，当前运行中通过 `previous_response_id` 串联请求
+- 默认启用 `parallel_tool_calls`，允许模型在一轮中返回多个工具调用；Host 按模型顺序逐个校验、审批和执行
 - 两个工具：`apply_patch`、`run_command`
 - 普通文件和 Skill 文件均通过命令行读取相关行范围。工具输出超出上下文预算时优先压缩正文并保留结构化字段
 - 文件读取、搜索和目录查看统一通过 `run_command`：优先使用 `rg` 搜索文本、`rg --files` 查找文件、`ls`（PowerShell 使用 `Get-ChildItem`）查看目录；随包提供 Windows/macOS 的 x64、ARM64 版 rg
@@ -14,7 +14,7 @@
 - `AGENTS.md` / `AGENTS.override.md` 项目指令加载
 - Markdown 文档目录：只注入路径和标题，需要时再读取正文
 - 本地 Skill 目录：在 8,000 字符预算内提供名称、描述和绝对路径；超过预算时通过完整索引搜索，再按需读取 `SKILL.md`
-- `--debug` 将每次 OpenAI 原始请求和完整响应写入私有 JSONL 日志
+- 会话过程默认写入 `.agent-runs/<会话 ID>.jsonl`，恢复历史和 Trace Viewer 共用同一文件；`--debug` 追加原始请求、响应、SSE 和异常详情
 - 默认通过 Responses API 事件流实时显示推理摘要和回答正文，使用 `--no-stream` 可关闭流式输出
 - 可替换的 `ModelAdapter`，测试使用假模型，不消耗 API 调用
 
@@ -38,9 +38,9 @@ flowchart LR
 
 1. 把任务、系统指令和工具 JSON Schema 发给模型。
 2. 如果模型返回一个或多个 `function_call`，按顺序解析并用 Zod 校验参数。
-3. 写操作和进程执行先交给 `ApprovalPolicy`；预检完成后，纯只读批次并发执行，包含写入或命令的批次保持顺序执行。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
+3. 每个工具调用先交给 `ApprovalPolicy`，批准后执行，再处理下一个调用。工作区文件操作由宿主策略自动批准，`run_command` 交给用户确认。
 4. 把结构化工具结果作为 `function_call_output` 发回模型。
-5. 模型不再调用工具时结束；超过最大轮数则强制停止。
+5. 模型不再调用工具时结束；超过最大轮数则强制停止，默认上限为 300 轮。
 
 这个流程对应 OpenAI 官方的 [function calling 工具循环](https://developers.openai.com/api/docs/guides/function-calling)。
 
@@ -163,11 +163,13 @@ Host 验证 `run_command` 的工作目录仍在 workspace 内，并限制执行�
 
 ## 交互式会话
 
-每轮成功响应的 `responseId` 会作为下一轮请求的 `previous_response_id`，因此“继续解释”“修改刚才提到的文件”等追问能看到此前上下文。具体机制参考 OpenAI 官方的 [conversation state](https://developers.openai.com/api/docs/guides/conversation-state)。
+当前进程连续处理同一会话时，成功响应的 `responseId` 会作为后续请求的 `previous_response_id`。这个续接 ID 只从当前运行的响应中取得。具体机制参考 OpenAI 官方的 [conversation state](https://developers.openai.com/api/docs/guides/conversation-state)。
 
-成功完成的交互会话还会保存在工作区的 `.agent-history/` 中。启动时若有已保存的历史会话，CLI 会列出最近的记录，可以输入序号或 ID 前缀继续，也可以输入 `0` 开启新对话。恢复会话时优先使用保存的 `responseId`；如果兼容 API 已经删除了对应的远端 response，则自动回放本地保存的 user/assistant 消息并建立新的 response 链。
+会话从第一条用户输入开始保存在工作区的 `.agent-runs/<会话 ID>.jsonl` 中，无需开启 `--debug`。用户输入、每次完整模型响应、工具结果和任务结束状态按发生顺序追加写入；重新打开同一会话后继续追加原文件。启动时可以输入历史序号或 ID 前缀继续，也可以输入 `0` 开启新对话。
 
-每个历史文件包含会话标题、模型、时间、最后一个 response ID 以及成功完成的消息轮次。默认标题取第一条用户消息的前 60 个字符，使用 `/rename` 可以修改。历史按工作区隔离，不会在不同代码仓库之间混用。
+启动时选择历史会话或使用 `/resume`，都会从本地记录回放消息、工具调用、工具结果及模型返回的 reasoning 项，首次请求不携带旧 `previous_response_id`。日志中的 response ID 只用于排障，恢复不要求存在这个字段。恢复后输入“继续”即可继续任务；已完成工具不会由恢复逻辑重新执行，缺少结果的工具会被标记为执行结果未知，交给模型核实。请求失败时保留当前进度，下一次输入从本地上下文继续。
+
+每个会话包含标题、模型、时间和运行状态。默认标题取第一条用户消息的前 60 个字符，使用 `/rename` 可以修改。历史按工作区隔离。旧 `.agent-history/*.json` 会在列出历史时导入新目录，原文件保留；导入不会覆盖已存在的新会话。旧格式只含最终问答，无法补回当时未保存的工具过程。
 
 交互命令：
 
@@ -184,39 +186,30 @@ Host 验证 `run_command` 的工作目录仍在 workspace 内，并限制执行�
 
 `/new` 和 `/resume` 只切换模型对话，不会撤销已经修改的工作区文件。工作区内的新建、修改和删除文件会自动批准；`run_command` 仍需逐次确认，`--yes` 可跳过确认。
 
-`.agent-history/` 已被 Git 忽略，`apply_patch` 禁止修改该目录。历史中仍可能包含用户输入、模型回复、源码片段或路径，因此不应把该目录提交或共享给其他人。
+`.agent-runs/` 是会话历史与调试记录的统一目录，已被当前仓库的 Git 忽略。
 
-## 查看 OpenAI 原始请求和响应
+## 会话记录与调试
 
-使用 `--debug` 启用：
+默认记录 `session.created`、`session.turn_started`、`session.model_requested`、`session.model_response`、`session.tool_output`、`session.turn_completed` / `session.turn_failed` 和重命名事件。工具结果在产生后立即保存，不必等待下一次 API 请求或整次任务完成。
+
+`/trace` 读取当前会话文件并生成 HTML；尚未选择会话时读取最近的日志。默认记录已经能够展示任务、模型输出、工具调用及其结果。恢复会话的上下文只使用完整的会话记录，不会把调试分片重复加入消息历史。
+
+需要排查模型服务时使用：
 
 ```bash
 npm run dev -- --workspace . --debug
 ```
 
-交互模式中输入 `/trace` 可以随时生成当前日志的 Trace Viewer 报告并自动打开浏览器；如果当前会话没有启用 `--debug`，则尝试打开工作区中最近一次已有日志。若没有任何日志，会提示使用 `--debug` 重新启动。
+`--debug` 在同一会话文件中额外追加：
 
-启动时会显示日志的绝对路径：
+- `openai.request`：原始请求体及 endpoint。
+- `openai.response`：完整响应、HTTP 元数据与 token usage。
+- `openai.stream`：逐条 SSE 事件，包括断流前收到的内容。
+- `openai.error`：错误、堆栈及直接 `cause`（如底层 socket 错误）。
 
-```text
-agent: raw OpenAI log: /path/to/project/.agent-runs/2026-08-14T15-10-00-000Z-12345.jsonl
-```
+调试事件通过 `traceId` 关联一次 API 请求，并通过 `turnId` 和 `step` 关联会话步骤。Trace Viewer 合并同一步骤的基础记录和 debug 记录，原始请求、响应仍可展开查看。旧的时间戳命名 debug JSONL 仍可查看，但不会自动作为可恢复会话导入。
 
-每次 API 调用产生两行具有相同 `traceId` 的 JSON：
-
-```json
-{"type":"openai.request","traceId":"...","endpoint":"https://ark.cn-beijing.volces.com/api/plan/v3/responses","body":{"model":"deepseek-v4-flash","instructions":"...","input":"...","tools":[...]}}
-{"type":"openai.response","traceId":"...","requestId":"req_...","durationMs":1234,"http":{"status":200,"headers":{"x-request-id":"req_..."}},"body":{"id":"resp_...","output":[...],"usage":{...}}}
-```
-
-请求失败时记录 `openai.error`。日志内容包括完整 instructions、用户输入、工具 Schema、工具结果、模型正文、工具调用和 token usage。它不会记录 API Key、Authorization、Cookie 或 Base URL 中的认证信息。
-
-日志文件权限设置为仅当前用户可读写（`0600`）。由于日志可能包含项目源码和用户数据：
-
-- `.agent-runs/` 已被当前仓库的 `.gitignore` 忽略
-- `apply_patch` 禁止修改 `.agent-runs/` 和 `.agent-history/`
-- `.agent-history/` 同样被 `.gitignore` 忽略；命令行仍可读取这些目录，读取范围由宿主审批把关
-- 对其他目标项目使用 `--workspace` 时，建议把 `.agent-runs/` 和 `.agent-history/` 加入该项目的 `.gitignore`
+文件权限为 `0600`。SDK 的认证请求头不会写入 debug 日志；请求内容可能包含源码、用户输入和工具输出。为其他工作区运行时，也应把 `.agent-runs/` 加入该项目的 `.gitignore`。
 
 可以用 `jq` 格式化查看：
 
@@ -347,13 +340,16 @@ npm test
 npm run build
 ```
 
-测试覆盖工具调用回传、审批拒绝、轮数上限、路径逃逸、敏感文件、多文件补丁、模型连接切换、项目指令、Markdown 目录和 Skill 发现。
+类型检查覆盖源码和测试，并检查未使用的局部变量、导入及参数。构建会先清理 `dist`，避免已删除模块继续留在产物中。
+
+测试覆盖工具调用回传、审批顺序与拒绝、轮数上限、路径校验、多文件补丁、模型连接切换、会话恢复、流式调试日志、项目指令、Markdown 目录和 Skill 发现。
 
 ## 代码导航
 
 - `src/core/agent-runner.ts`：Agent 状态机和工具循环
-- `src/cli/interactive-session.ts`：跨轮 responseId、交互命令和会话重置
-- `src/logging/`：OpenAI 原始请求/响应的 JSONL 调试日志
+- `src/cli/interactive-session.ts`：本地历史恢复、当前运行的请求续接和交互命令
+- `src/history/session-store.ts`：统一会话 JSONL、恢复上下文和旧历史导入
+- `src/logging/`：原始请求、响应、SSE 和异常事件类型
 - `src/config/app-config.ts`：连接配置加载及模型选择
 - `src/model/configured-model.ts`：模型到 API 连接的路由
 - `src/model/openai-model.ts`：Responses API 适配器

@@ -2,7 +2,6 @@ import type {
   AgentEventHandler,
   AgentRunResult,
   ApprovalPolicy,
-  ConversationMessage,
   ModelAdapter,
   ModelInputItem,
   ModelResponse,
@@ -10,9 +9,9 @@ import type {
   ReasoningSummaryMode,
   ToolCallOutput,
 } from "./types.js";
-import type { AgentTool, ToolContext, ToolRegistry } from "../tools/types.js";
+import type { ToolContext, ToolRegistry } from "../tools/types.js";
 
-export const DEFAULT_MAX_STEPS = 100;
+export const DEFAULT_MAX_STEPS = 300;
 
 const MIN_TOOL_OUTPUT_CHARS = 128;
 const TRUNCATION_MARKER = "…[truncated]…";
@@ -42,17 +41,6 @@ interface JsonTruncationCounts {
   truncatedArrays: number;
   omittedArrayItems: number;
 }
-
-interface PreparedToolCall {
-  index: number;
-  call: ModelToolCall;
-  tool: AgentTool<any>;
-  arguments: unknown;
-}
-
-type ToolExecutionOutcome =
-  | { prepared: PreparedToolCall; output: ToolCallOutput; ok: true; result: unknown }
-  | { prepared: PreparedToolCall; output: ToolCallOutput; ok: false; error: string };
 
 function previewHeadAndTail(value: string, retainedChars: number): string {
   const headChars = Math.ceil(retainedChars / 2);
@@ -235,7 +223,6 @@ export interface AgentRunnerOptions {
   approvalPolicy: ApprovalPolicy;
   maxSteps?: number;
   maxToolOutputChars?: number;
-  maxParallelToolCalls?: number;
   reasoningSummary?: ReasoningSummaryMode;
   stream?: boolean;
   onEvent?: AgentEventHandler;
@@ -244,7 +231,7 @@ export interface AgentRunnerOptions {
 export interface AgentRunOptions {
   previousResponseId?: string;
   model?: string;
-  history?: ConversationMessage[];
+  history?: ModelInputItem[];
 }
 
 export class AgentLimitError extends Error {
@@ -257,10 +244,10 @@ export class AgentLimitError extends Error {
 export class AgentRunner {
   readonly #options: Required<Pick<
     AgentRunnerOptions,
-    "maxSteps" | "maxToolOutputChars" | "maxParallelToolCalls" | "stream"
+    "maxSteps" | "maxToolOutputChars" | "stream"
   >> & Omit<
     AgentRunnerOptions,
-    "maxSteps" | "maxToolOutputChars" | "maxParallelToolCalls" | "stream"
+    "maxSteps" | "maxToolOutputChars" | "stream"
   >;
 
   constructor(options: AgentRunnerOptions) {
@@ -270,15 +257,10 @@ export class AgentRunner {
         `maxToolOutputChars must be an integer of at least ${MIN_TOOL_OUTPUT_CHARS}.`,
       );
     }
-    const maxParallelToolCalls = options.maxParallelToolCalls ?? 4;
-    if (!Number.isInteger(maxParallelToolCalls) || maxParallelToolCalls < 1 || maxParallelToolCalls > 32) {
-      throw new RangeError("maxParallelToolCalls must be an integer from 1 through 32.");
-    }
     this.#options = {
       ...options,
       maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
       maxToolOutputChars,
-      maxParallelToolCalls,
       stream: options.stream ?? true,
     };
   }
@@ -300,6 +282,7 @@ export class AgentRunner {
     const modelName = runOptions.model?.trim() || this.#options.modelName;
 
     for (let step = 1; step <= this.#options.maxSteps; step += 1) {
+      await this.#emit({ type: "model_requested", step, model: modelName });
       let response: ModelResponse;
       try {
         response = await this.#options.model.respond({
@@ -331,162 +314,53 @@ export class AgentRunner {
         return { output, steps: step, responseId: response.id };
       }
 
-      input = this.#isParallelReadBatch(response.toolCalls)
-        ? await this.#executeParallelReadBatch(response.toolCalls, step)
-        : await this.#executeSequentialBatch(response.toolCalls, step);
+      input = await this.#executeTools(response.toolCalls, step);
     }
 
     throw new AgentLimitError(this.#options.maxSteps);
   }
 
-  #isParallelReadBatch(calls: ModelToolCall[]): boolean {
-    return calls.length > 1 && calls.every((call) => {
-      const tool = this.#options.tools.get(call.name);
-      return tool?.risk === "read" && tool.executionMode === "parallel";
-    });
-  }
-
-  async #executeSequentialBatch(calls: ModelToolCall[], step: number): Promise<ToolCallOutput[]> {
+  async #executeTools(calls: ModelToolCall[], step: number): Promise<ToolCallOutput[]> {
     const outputs: ToolCallOutput[] = [];
     for (const call of calls) {
       const tool = this.#options.tools.get(call.name);
       await this.#emit({ type: "tool_requested", step, call, risk: tool?.risk });
       if (!tool) {
-        outputs.push(this.#toolOutput(call.callId, {
+        await this.#recordToolOutput(outputs, step, this.#toolOutput(call.callId, {
           ok: false,
           error: `Unknown tool: ${call.name}`,
         }));
         continue;
       }
 
+      let output: ToolCallOutput;
       try {
         const rawArguments = JSON.parse(call.arguments) as unknown;
         const parsedArguments = tool.parse(rawArguments);
-        if (tool.risk !== "read") {
-          const approvalRequest = {
-            toolName: call.name,
-            risk: tool.risk,
-            arguments: parsedArguments,
-          } as const;
-          await this.#emit({ type: "approval_requested", step, request: approvalRequest });
-          const approved = await this.#options.approvalPolicy.approve(approvalRequest);
-          if (!approved) {
-            outputs.push(this.#toolOutput(call.callId, {
-              ok: false,
-              error: "User denied this tool call.",
-            }));
-            continue;
-          }
+        const approvalRequest = { toolName: call.name, risk: tool.risk, arguments: parsedArguments } as const;
+        await this.#emit({ type: "approval_requested", step, request: approvalRequest });
+        const approved = await this.#options.approvalPolicy.approve(approvalRequest);
+        if (!approved) {
+          output = this.#toolOutput(call.callId, { ok: false, error: "User denied this tool call." });
+        } else {
+          const result = await tool.execute(parsedArguments, this.#options.toolContext);
+          output = this.#toolOutput(call.callId, { ok: true, result });
+          await this.#emit({ type: "tool_completed", step, callId: call.callId, toolName: call.name, result });
         }
-
-        const result = await tool.execute(parsedArguments, this.#options.toolContext);
-        const output = this.#toolOutput(call.callId, { ok: true, result });
-        await this.#emit({
-          type: "tool_completed",
-          step,
-          callId: call.callId,
-          toolName: call.name,
-          result,
-        });
-        outputs.push(output);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        await this.#emit({
-          type: "tool_failed",
-          step,
-          callId: call.callId,
-          toolName: call.name,
-          error: message,
-        });
-        outputs.push(this.#toolOutput(call.callId, { ok: false, error: message }));
+        await this.#emit({ type: "tool_failed", step, callId: call.callId, toolName: call.name, error: message });
+        output = this.#toolOutput(call.callId, { ok: false, error: message });
       }
+      // Persistence failures must stop the run, not turn a completed action into a tool failure.
+      await this.#recordToolOutput(outputs, step, output);
     }
     return outputs;
   }
 
-  async #executeParallelReadBatch(
-    calls: ModelToolCall[],
-    step: number,
-  ): Promise<ToolCallOutput[]> {
-    const outputs: Array<ToolCallOutput | undefined> = new Array(calls.length);
-    const preparedCalls: PreparedToolCall[] = [];
-
-    // These tools are known, read-only, and explicitly parallel-safe. Parse in
-    // model order before starting any work so malformed siblings fail cleanly.
-    for (const [index, call] of calls.entries()) {
-      const tool = this.#options.tools.get(call.name);
-      if (!tool) throw new Error(`Parallel-read preflight lost tool '${call.name}'.`);
-      await this.#emit({ type: "tool_requested", step, call, risk: tool.risk });
-      try {
-        const rawArguments = JSON.parse(call.arguments) as unknown;
-        preparedCalls.push({ index, call, tool, arguments: tool.parse(rawArguments) });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await this.#emit({
-          type: "tool_failed",
-          step,
-          callId: call.callId,
-          toolName: call.name,
-          error: message,
-        });
-        outputs[index] = this.#toolOutput(call.callId, { ok: false, error: message });
-      }
-    }
-
-    for (let offset = 0; offset < preparedCalls.length; offset += this.#options.maxParallelToolCalls) {
-      const chunk = preparedCalls.slice(offset, offset + this.#options.maxParallelToolCalls);
-      const outcomes = await Promise.all(chunk.map((prepared) => this.#executeTool(prepared)));
-
-      // Event handlers stay serialized and results remain in model order even
-      // though the underlying read operations in this chunk ran concurrently.
-      for (const outcome of outcomes) {
-        const { prepared } = outcome;
-        if (outcome.ok) {
-          await this.#emit({
-            type: "tool_completed",
-            step,
-            callId: prepared.call.callId,
-            toolName: prepared.call.name,
-            result: outcome.result,
-          });
-        } else {
-          await this.#emit({
-            type: "tool_failed",
-            step,
-            callId: prepared.call.callId,
-            toolName: prepared.call.name,
-            error: outcome.error,
-          });
-        }
-        outputs[prepared.index] = outcome.output;
-      }
-    }
-
-    return Array.from(outputs, (output, index) => {
-      if (output) return output;
-      throw new Error(`Tool call at index ${index} completed without an output.`);
-    });
-  }
-
-  async #executeTool(prepared: PreparedToolCall): Promise<ToolExecutionOutcome> {
-    const { call, tool, arguments: parsedArguments } = prepared;
-    try {
-      const result = await tool.execute(parsedArguments, this.#options.toolContext);
-      return {
-        prepared,
-        ok: true,
-        result,
-        output: this.#toolOutput(call.callId, { ok: true, result }),
-      };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        prepared,
-        ok: false,
-        error: message,
-        output: this.#toolOutput(call.callId, { ok: false, error: message }),
-      };
-    }
+  async #recordToolOutput(outputs: ToolCallOutput[], step: number, output: ToolCallOutput): Promise<void> {
+    await this.#emit({ type: "tool_output", step, output });
+    outputs.push(output);
   }
 
   #toolOutput(callId: string, value: ToolOutputValue): ToolCallOutput {

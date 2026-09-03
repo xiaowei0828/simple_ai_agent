@@ -1,12 +1,12 @@
-import { PreviousResponseUnavailableError } from "../core/errors.js";
 import type { AgentRunOptions } from "../core/agent-runner.js";
-import type { AgentRunResult, ConversationMessage } from "../core/types.js";
+import type { AgentRunResult } from "../core/types.js";
 import {
   createConversationTitle,
+  replayConversation,
   type Conversation,
   type ConversationStore,
   type ConversationSummary,
-} from "../history/conversation-store.js";
+} from "../history/session-store.js";
 
 export interface InteractiveAgent {
   run(task: string, options?: AgentRunOptions): Promise<AgentRunResult>;
@@ -21,10 +21,10 @@ export interface InteractiveIO {
 export interface InteractiveSessionOptions {
   agent: InteractiveAgent;
   io: InteractiveIO;
-  initialModel?: string;
+  initialModel: string;
   availableModels?: string[];
-  historyStore?: ConversationStore;
-  viewLatestTrace?: () => Promise<string>;
+  historyStore: ConversationStore;
+  viewLatestTrace?: (conversationId?: string) => Promise<string>;
 }
 
 const HELP = `Commands:
@@ -33,34 +33,32 @@ const HELP = `Commands:
   /history               List saved conversations
   /resume <number|id>    Resume a saved conversation
   /rename <title>        Rename the current conversation
-  /trace                 Generate and open the latest trace report
+  /trace                 Generate and open the current session trace report
   /new                   Start a new conversation
   /help                  Show this help
   /exit                  Exit the agent`;
 
 export async function runInteractiveSession(options: InteractiveSessionOptions): Promise<void> {
+  // Resume always replays local context; only responses from this run can seed continuation.
   let previousResponseId: string | undefined;
-  let currentModel = options.initialModel?.trim() || undefined;
+  let currentModel = options.initialModel;
   let currentConversation: Conversation | undefined;
 
-  if (options.historyStore) {
-    try {
-      const selected = await selectInitialConversation(options.historyStore, options.io);
-      if (selected === undefined) return;
-      if (selected) {
-        currentConversation = selected;
-        previousResponseId = selected.lastResponseId;
-        currentModel = selected.model;
-        options.io.writeStatus(formatResumedConversation(selected));
-      }
-    } catch (error) {
-      options.io.writeStatus(`Unable to load conversation history: ${errorMessage(error)}`);
+  try {
+    const selected = await selectInitialConversation(options.historyStore, options.io);
+    if (selected === undefined) return;
+    if (selected) {
+      currentConversation = selected;
+      currentModel = selected.model;
+      options.io.writeStatus(formatResumedConversation(selected));
     }
+  } catch (error) {
+    options.io.writeStatus(`Unable to load conversation history: ${errorMessage(error)}`);
   }
 
   let availableModels = uniqueModels(currentModel, options.availableModels ?? []);
   options.io.writeStatus(
-    `Interactive mode.${currentModel ? ` Model: ${currentModel}.` : ""} Type /help for commands.`,
+    `Interactive mode. Model: ${currentModel}. Type /help for commands.`,
   );
 
   while (true) {
@@ -81,10 +79,6 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         options.io.writeStatus("Started a new conversation.");
         continue;
       case "/history":
-        if (!options.historyStore) {
-          options.io.writeStatus("Conversation history is unavailable in this session.");
-          continue;
-        }
         try {
           options.io.writeStatus(formatConversationList(await options.historyStore.list()));
         } catch (error) {
@@ -92,10 +86,6 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         }
         continue;
       case "/resume": {
-        if (!options.historyStore) {
-          options.io.writeStatus("Conversation history is unavailable in this session.");
-          continue;
-        }
         const selector = commandArguments.join(" ").trim();
         if (!selector) {
           options.io.writeStatus("Usage: /resume <number|id>");
@@ -111,7 +101,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
             continue;
           }
           currentConversation = await options.historyStore.load(selected.id);
-          previousResponseId = currentConversation.lastResponseId;
+          previousResponseId = undefined;
           currentModel = currentConversation.model;
           availableModels = uniqueModels(currentModel, availableModels);
           options.io.writeStatus(formatResumedConversation(currentConversation));
@@ -121,7 +111,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         continue;
       }
       case "/rename": {
-        if (!options.historyStore || !currentConversation) {
+        if (!currentConversation) {
           options.io.writeStatus("There is no saved current conversation to rename.");
           continue;
         }
@@ -174,7 +164,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           continue;
         }
         try {
-          const reportPath = await options.viewLatestTrace();
+          const reportPath = await options.viewLatestTrace(currentConversation?.id);
           options.io.writeStatus(`Opened trace report: ${reportPath}`);
         } catch (error) {
           options.io.writeStatus(`Trace view failed: ${errorMessage(error)}`);
@@ -189,51 +179,43 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
 
     try {
       const history = currentConversation && !previousResponseId
-        ? toConversationMessages(currentConversation)
+        ? replayConversation(currentConversation)
         : undefined;
-      let result: AgentRunResult;
-      try {
-        result = await options.agent.run(task, {
-          previousResponseId,
-          ...(history?.length ? { history } : {}),
-          ...(currentModel ? { model: currentModel } : {}),
-        });
-      } catch (error) {
-        if (!(error instanceof PreviousResponseUnavailableError) || !currentConversation) {
-          throw error;
-        }
-        options.io.writeStatus(
-          "The remote conversation is unavailable. Replaying the saved local transcript.",
-        );
-        result = await options.agent.run(task, {
-          history: toConversationMessages(currentConversation),
-          ...(currentModel ? { model: currentModel } : {}),
-        });
+      if (!currentConversation) {
+        currentConversation = await options.historyStore.create({ model: currentModel, title: createConversationTitle(task) });
+        options.io.writeStatus(`Session log: ${options.historyStore.filePath(currentConversation.id)}`);
       }
+      await options.historyStore.beginTurn(currentConversation.id, task);
+      const result = await options.agent.run(task, {
+        previousResponseId,
+        ...(history?.length ? { history } : {}),
+        model: currentModel,
+      });
 
       previousResponseId = result.responseId;
       options.io.writeAssistant(result.output);
 
-      if (options.historyStore && currentModel) {
-        const turn = {
-          user: task,
-          assistant: result.output,
-          responseId: result.responseId,
-          createdAt: new Date().toISOString(),
-        };
-        try {
-          currentConversation = currentConversation
-            ? await options.historyStore.appendTurn(currentConversation.id, turn)
-            : await options.historyStore.create({
-              model: currentModel,
-              title: createConversationTitle(task),
-              firstTurn: turn,
-            });
-        } catch (error) {
-          options.io.writeStatus(`Unable to save conversation history: ${errorMessage(error)}`);
-        }
+      const turn = {
+        user: task,
+        assistant: result.output,
+        responseId: result.responseId,
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        currentConversation = await options.historyStore.appendTurn(currentConversation.id, turn);
+      } catch (error) {
+        options.io.writeStatus(`Unable to save conversation history: ${errorMessage(error)}`);
       }
     } catch (error) {
+      if (currentConversation) {
+        try {
+          await options.historyStore.failTurn(currentConversation.id, errorMessage(error));
+          currentConversation = await options.historyStore.load(currentConversation.id);
+          previousResponseId = undefined;
+        } catch (saveError) {
+          options.io.writeStatus(`Unable to save interrupted conversation: ${errorMessage(saveError)}`);
+        }
+      }
       options.io.writeStatus(`Request failed: ${errorMessage(error)}`);
     }
   }
@@ -277,7 +259,7 @@ function formatConversationList(conversations: ConversationSummary[]): string {
   if (conversations.length === 0) return "No saved conversations.";
   const entries = conversations.map((conversation, index) =>
     `  ${index + 1}. ${conversation.title} [${conversation.model}] `
-      + `${formatTimestamp(conversation.updatedAt)} (${conversation.turnCount} turn(s), `
+      + `${formatTimestamp(conversation.updatedAt)} (${conversation.turnCount} turn(s), ${conversation.status}, `
       + `${conversation.id.slice(0, 8)})`
   );
   return ["Saved conversations:", ...entries, "Use /resume <number|id> to continue."].join("\n");
@@ -294,23 +276,17 @@ function formatResumedConversation(conversation: Conversation): string {
     `Resumed conversation: ${conversation.title} [${conversation.model}]`,
     ...(omitted > 0 ? [`… ${omitted} earlier turn(s) omitted from display.`] : []),
     ...transcript,
+    ...(conversation.pendingTask ? [`Interrupted task: ${conversation.pendingTask}\nSaved tool results will be included when you continue.`] : []),
   ].join("\n\n");
-}
-
-function toConversationMessages(conversation: Conversation): ConversationMessage[] {
-  return conversation.turns.flatMap((turn) => [
-    { role: "user" as const, content: turn.user },
-    { role: "assistant" as const, content: turn.assistant },
-  ]);
 }
 
 function formatTimestamp(timestamp: string): string {
   return timestamp.replace("T", " ").replace(/:\d{2}\.\d{3}Z$/u, "Z");
 }
 
-function uniqueModels(currentModel: string | undefined, configuredModels: string[]): string[] {
+function uniqueModels(currentModel: string, configuredModels: string[]): string[] {
   const models = [...new Set(configuredModels.map((model) => model.trim()).filter(Boolean))];
-  if (currentModel && !models.includes(currentModel)) models.unshift(currentModel);
+  if (!models.includes(currentModel)) models.unshift(currentModel);
   return models;
 }
 
@@ -323,16 +299,13 @@ function findModel(models: string[], selector: string): string | undefined {
   return models.find((model) => model.toLowerCase() === normalized);
 }
 
-function formatModelList(models: string[], currentModel: string | undefined): string {
-  if (models.length === 0) {
-    return "No models are configured.";
-  }
+function formatModelList(models: string[], currentModel: string): string {
   const entries = models.map((model, index) => {
     const marker = model === currentModel ? "*" : " ";
     return `  ${marker} ${index + 1}. ${model}`;
   });
   return [
-    `Current model: ${currentModel ?? "not selected"}`,
+    `Current model: ${currentModel}`,
     "Available models:",
     ...entries,
     "Use /model <number|name> to switch.",

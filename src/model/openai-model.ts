@@ -8,8 +8,7 @@ import type {
   ResponseInputItem,
 } from "openai/resources/responses/responses";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "../core/types.js";
-import { PreviousResponseUnavailableError } from "../core/errors.js";
-import type { OpenAITraceSink } from "../logging/openai-trace.js";
+import type { OpenAIErrorTrace, OpenAITraceSink } from "../logging/openai-trace.js";
 
 export type OpenAIModelOptions = ({
   apiKey: string;
@@ -102,7 +101,7 @@ export class OpenAIModel implements ModelAdapter {
     let result: CompletedResponseWithHttp;
     try {
       result = request.stream
-        ? await this.#createStreamingResponse(body as ResponseCreateParamsStreaming, request)
+        ? await this.#createStreamingResponse(body as ResponseCreateParamsStreaming, request, traceId)
         : await this.#client.responses.create(nonStreamingBody).withResponse();
     } catch (error) {
       await this.#traceSink?.log({
@@ -112,9 +111,6 @@ export class OpenAIModel implements ModelAdapter {
         durationMs: Math.round(performance.now() - startedAt),
         error: serializeError(error),
       });
-      if (request.previousResponseId && isPreviousResponseUnavailable(error)) {
-        throw new PreviousResponseUnavailableError(request.previousResponseId, error);
-      }
       throw error;
     }
 
@@ -147,16 +143,22 @@ export class OpenAIModel implements ModelAdapter {
           name: item.name,
           arguments: item.arguments,
         })),
+      outputItems: response.output as unknown as ModelResponse["outputItems"],
+      usage: response.usage as unknown as ModelResponse["usage"],
     };
   }
 
   async #createStreamingResponse(
     body: ResponseCreateParamsStreaming,
     request: ModelRequest,
+    traceId: string,
   ): Promise<CompletedResponseWithHttp> {
     const result = await this.#client.responses.create(body).withResponse();
 
     for await (const event of result.data) {
+      await this.#traceSink?.log({
+        type: "openai.stream", timestamp: new Date().toISOString(), traceId, event,
+      });
       switch (event.type) {
         case "response.output_text.delta":
           await request.onStreamEvent?.({ type: "output_text_delta", delta: event.delta });
@@ -232,21 +234,6 @@ function isReasoningSummaryUnsupported(error: unknown): boolean {
     && /summary|unsupported|not supported|unknown|unrecognized|invalid|extra/iu.test(description);
 }
 
-function isPreviousResponseUnavailable(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const details = error as { status?: unknown; message?: unknown; error?: unknown };
-  const status = typeof details.status === "number" ? details.status : undefined;
-  if (status === 410) return true;
-  if (status !== 400 && status !== 404 && status !== 422) return false;
-
-  const description = JSON.stringify({
-    message: details.message,
-    error: details.error,
-  });
-  return /previous[_\s-]*response|(?:response|resp[_-])[^\n]{0,80}(?:not found|expired|missing|invalid)/iu
-    .test(description);
-}
-
 function createLoggableEndpoint(baseURL: string): string {
   const url = new URL(baseURL);
   url.username = "";
@@ -264,13 +251,7 @@ function safeResponseHeaders(headers: Headers): Record<string, string> {
   );
 }
 
-function serializeError(error: unknown): {
-  name: string;
-  message: string;
-  status?: number;
-  requestId?: string | null;
-  body?: unknown;
-} {
+function serializeError(error: unknown): OpenAIErrorTrace["error"] {
   if (!(error instanceof Error)) {
     return { name: "Error", message: String(error) };
   }
@@ -288,5 +269,13 @@ function serializeError(error: unknown): {
       ? { requestId: details.request_id }
       : {}),
     ...(details.error === undefined ? {} : { body: details.error }),
+    stack: error.stack,
+    ...(error.cause instanceof Error ? {
+      cause: {
+        name: error.cause.name,
+        message: error.cause.message,
+        ...("code" in error.cause ? { code: error.cause.code } : {}),
+      },
+    } : {}),
   };
 }

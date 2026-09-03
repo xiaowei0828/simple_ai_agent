@@ -21,7 +21,7 @@ Options:
       --skill-root <path>   Additional directory containing <skill>/SKILL.md
       --stream              Stream model output (default)
       --no-stream           Wait for complete model responses
-      --debug               Write raw OpenAI request/response JSONL logs
+      --debug               Add raw requests, responses, and SSE events to the session log
   -y, --yes                 Approve run_command calls without prompting
   -h, --help                Show this help
 
@@ -67,8 +67,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
       options.workspace = requireValue(argv, ++index, argument);
     } else if (argument === "--max-steps") {
       const value = Number(requireValue(argv, ++index, argument));
-      if (!Number.isInteger(value) || value < 1 || value > 100) {
-        throw new Error("--max-steps must be an integer between 1 and 100.");
+      if (!Number.isInteger(value) || value < 1 || value > DEFAULT_MAX_STEPS) {
+        throw new Error(`--max-steps must be an integer between 1 and ${DEFAULT_MAX_STEPS}.`);
       }
       options.maxSteps = value;
     } else if (argument === "--skill-root") {
