@@ -12,8 +12,8 @@ import { createTempDirectoryFixture } from "./test-utils.js";
 
 const config: AppConfig = {
   connections: [
-    { apiKey: "first-key", baseUrl: "https://first.test/v1", models: [{ id: "model-b", reasoningSummary: "detailed" }, { id: "model-a" }] },
-    { apiKey: "second-key", baseUrl: "https://second.test/v1", models: [{ id: "model-c", reasoningSummary: "off" }] },
+    { apiKey: "first-key", baseUrl: "https://first.test/v1", models: [{ id: "model-b" }, { id: "model-a" }] },
+    { apiKey: "second-key", baseUrl: "https://second.test/v1", models: [{ id: "model-c" }] },
   ],
 };
 
@@ -29,7 +29,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("application configuration", () => {
   it("loads an optional defaults block alongside multiple API connections", async () => {
     const configPath = await configFile();
-    for (const defaults of [undefined, {}, { model: "model-c", reasoningEffort: "medium", reasoningSummary: "auto" }]) {
+    for (const defaults of [undefined, {}, { model: "model-c", reasoningEffort: "medium" }]) {
       const input = { ...config, ...(defaults ? { defaults } : {}) };
       await writeFile(configPath, JSON.stringify(input), "utf8");
       await expect(loadAppConfig(configPath)).resolves.toEqual(input);
@@ -51,15 +51,14 @@ describe("application configuration", () => {
   it("uses code defaults and selects models across connections", () => {
     expect(resolveRuntimeModelConfig(config)).toEqual({
       connectionIndex: 0, selector: "model-b", model: "model-b",
-      apiKey: "first-key", baseUrl: "https://first.test/v1", reasoningSummary: "detailed",
+      apiKey: "first-key", baseUrl: "https://first.test/v1",
       reasoningEffort: "medium", supportedReasoningEfforts: REASONING_EFFORTS,
     });
     expect(resolveRuntimeModelConfig(config, "model-c")).toEqual({
       connectionIndex: 1, selector: "model-c", model: "model-c",
-      apiKey: "second-key", baseUrl: "https://second.test/v1", reasoningSummary: undefined,
+      apiKey: "second-key", baseUrl: "https://second.test/v1",
       reasoningEffort: "medium", supportedReasoningEfforts: REASONING_EFFORTS,
     });
-    expect(resolveRuntimeModelConfig(config, "model-a").reasoningSummary).toBe("auto");
   });
 
   it("uses the configured default model while allowing an explicit selection to override it", () => {
@@ -75,31 +74,32 @@ describe("application configuration", () => {
   it("resolves shared defaults before validating per-model overrides and supported efforts", async () => {
     const configPath = await configFile();
     const input: AppConfig = {
-      defaults: { reasoningEffort: "high", reasoningSummary: "concise" },
+      defaults: { reasoningEffort: "high" },
       connections: [{ ...config.connections[0]!, models: [
         { id: "inherited", contextWindow: 300_000, supportedReasoningEfforts: ["high", "max"] },
-        { id: "overridden", contextWindow: 32_000, reasoningEffort: "none", reasoningSummary: "off", supportedReasoningEfforts: ["none"] },
-        { id: "partial", reasoningSummary: "detailed" },
+        { id: "overridden", contextWindow: 32_000, reasoningEffort: "none", supportedReasoningEfforts: ["none"] },
+        { id: "partial" },
       ] }],
     };
     await writeFile(configPath, JSON.stringify(input));
     const loaded = await loadAppConfig(configPath);
     expect(resolveRuntimeModelConfig(loaded, "inherited")).toMatchObject({
-      contextWindow: 300_000, reasoningEffort: "high", reasoningSummary: "concise", supportedReasoningEfforts: ["high", "max"],
+      contextWindow: 300_000, reasoningEffort: "high", supportedReasoningEfforts: ["high", "max"],
     });
     expect(resolveRuntimeModelConfig(loaded, "overridden")).toMatchObject({
-      contextWindow: 32_000, reasoningEffort: "none", reasoningSummary: undefined, supportedReasoningEfforts: ["none"],
+      contextWindow: 32_000, reasoningEffort: "none", supportedReasoningEfforts: ["none"],
     });
-    expect(resolveRuntimeModelConfig(loaded, "partial")).toMatchObject({ reasoningEffort: "high", reasoningSummary: "detailed" });
+    expect(resolveRuntimeModelConfig(loaded, "partial")).toMatchObject({ reasoningEffort: "high" });
     expect(resolveRuntimeModelConfig(config).contextWindow).toBeUndefined();
   });
 
-  it("preserves an explicit summary-off default and allows models to enable summaries", () => {
-    const shared: AppConfig = { ...config, defaults: { reasoningSummary: "off" } };
-    expect(resolveRuntimeModelConfig(shared, "model-a")).toMatchObject({ reasoningSummary: undefined, reasoningEffort: "medium" });
-    expect(resolveRuntimeModelConfig(shared, "model-b").reasoningSummary).toBe("detailed");
-    expect(resolveRuntimeModelConfig({ ...config, defaults: { reasoningEffort: "high" } }, "model-a"))
-      .toMatchObject({ reasoningEffort: "high", reasoningSummary: "auto" });
+  it("applies the shared reasoning effort unless a model overrides it", () => {
+    const shared: AppConfig = { ...config, defaults: { reasoningEffort: "high" } };
+    expect(resolveRuntimeModelConfig(shared, "model-a").reasoningEffort).toBe("high");
+    expect(resolveRuntimeModelConfig({
+      ...shared,
+      connections: [{ ...config.connections[0]!, models: [{ id: "model-a", reasoningEffort: "low" }] }],
+    }, "model-a").reasoningEffort).toBe("low");
   });
 
   it("distinguishes duplicate model names without silently selecting a connection", () => {
@@ -149,7 +149,7 @@ describe("application configuration", () => {
   it("reports the full model path for invalid reasoning and context settings", async () => {
     const configPath = await configFile();
     for (const invalid of [
-      { reasoningSummary: "everything" }, { reasoningEffort: "off" },
+      { reasoningSummary: "auto" }, { reasoningEffort: "off" },
       ...[-1, 0, 1_023, 300_000.5, "300000"].map((contextWindow) => ({ contextWindow })),
       { supportedReasoningEfforts: [] }, { supportedReasoningEfforts: ["unknown"] },
       { supportedReasoningEfforts: ["medium", "medium"] },
@@ -159,7 +159,7 @@ describe("application configuration", () => {
       await writeFile(configPath, JSON.stringify({ connections: [config.connections[0], {
         ...config.connections[1], models: [{ id: "model-c", ...invalid }],
       }] }));
-      await expect(loadAppConfig(configPath)).rejects.toThrow("connections.1.models.0.");
+      await expect(loadAppConfig(configPath)).rejects.toThrow("connections.1.models.0");
     }
   });
 
@@ -174,7 +174,7 @@ describe("application configuration", () => {
   it("accepts only model and reasoning defaults in the shared block", async () => {
     const configPath = await configFile();
     for (const defaults of [
-      { reasoningEffort: "invalid" }, { reasoningSummary: "invalid" },
+      { reasoningEffort: "invalid" }, { reasoningSummary: "auto" },
       { model: "" },
       { contextWindow: 300_000 }, { supportedReasoningEfforts: ["medium"] },
     ]) {

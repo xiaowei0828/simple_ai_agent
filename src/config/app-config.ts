@@ -1,24 +1,19 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { REASONING_EFFORTS, type ReasoningEffort, type ReasoningSummaryMode } from "../core/types.js";
+import { REASONING_EFFORTS, type ReasoningEffort } from "../core/types.js";
 
-const DEFAULT_REASONING_SUMMARY = "auto" as const;
 const DEFAULT_REASONING_EFFORT = "medium" as const;
 
 const effortSchema = z.enum(REASONING_EFFORTS);
-const reasoningDefaultsSchema = z.object({
+const defaultsSchema = z.object({
+  model: z.string().trim().min(1).optional(),
   reasoningEffort: effortSchema.optional(),
-  reasoningSummary: z.enum(["off", "auto", "concise", "detailed"]).optional(),
 }).strict();
 
-const defaultsSchema = reasoningDefaultsSchema.extend({
-  model: z.string().trim().min(1).optional(),
-});
-
 const modelConfigSchema = z.object({
-  ...reasoningDefaultsSchema.shape,
   id: z.string().trim().min(1),
+  reasoningEffort: effortSchema.optional(),
   contextWindow: z.number().int().min(1_024).optional(),
   supportedReasoningEfforts: z.array(effortSchema).min(1).optional(),
 }).strict().superRefine((model, context) => {
@@ -82,7 +77,6 @@ export interface ConfiguredModelChoice {
 export interface RuntimeModelConfig extends ConfiguredModelChoice {
   apiKey: string;
   baseUrl: string;
-  reasoningSummary?: ReasoningSummaryMode;
   reasoningEffort: ReasoningEffort;
   supportedReasoningEfforts: readonly ReasoningEffort[];
   contextWindow?: number;
@@ -133,12 +127,10 @@ export function resolveRuntimeModelConfig(
   }
   const connection = config.connections[choice.connectionIndex]!;
   const selected = connection.models.find((entry) => entry.id === choice.model)!;
-  const reasoningSummary = selected.reasoningSummary ?? config.defaults?.reasoningSummary ?? DEFAULT_REASONING_SUMMARY;
   return {
     ...choice,
     apiKey: connection.apiKey.trim(),
     baseUrl: connection.baseUrl,
-    reasoningSummary: reasoningSummary === "off" ? undefined : reasoningSummary,
     reasoningEffort: selected.reasoningEffort ?? config.defaults?.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
     supportedReasoningEfforts: selected.supportedReasoningEfforts ?? REASONING_EFFORTS,
     ...(selected.contextWindow !== undefined ? { contextWindow: selected.contextWindow } : {}),

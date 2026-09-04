@@ -11,7 +11,6 @@ import type {
   ModelResponse,
   ModelToolCall,
   ReasoningEffort,
-  ReasoningSummaryMode,
   ToolCallOutput,
 } from "./types.js";
 import type { ToolContext, ToolRegistry } from "../tools/types.js";
@@ -232,7 +231,6 @@ export interface AgentRunnerOptions {
   approvalPolicy: ApprovalPolicy;
   maxSteps?: number;
   maxToolOutputChars?: number;
-  reasoningSummary?: ReasoningSummaryMode;
   reasoningEffort?: ReasoningEffort;
   stream?: boolean;
   onEvent?: AgentEventHandler;
@@ -314,7 +312,7 @@ export class AgentRunner {
           instructions: this.#options.instructions,
           input,
           previousResponseId,
-          reasoningSummary: this.#options.reasoningSummary,
+          reasoningSummary: "auto",
           reasoningEffort,
           stream: this.#options.stream,
           onStreamEvent: this.#options.stream

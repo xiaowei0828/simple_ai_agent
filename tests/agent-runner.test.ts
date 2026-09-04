@@ -110,7 +110,7 @@ describe("AgentRunner", () => {
     expect(model.requests[0]?.model).toBe("selected-model");
   });
 
-  it("requests configured reasoning summaries on every model turn", async () => {
+  it("requests automatic reasoning summaries on every model turn", async () => {
     const root = await fixture();
     const model = new ScriptedModel([
       { id: "response-1", outputText: "Done.", toolCalls: [] },
@@ -122,12 +122,11 @@ describe("AgentRunner", () => {
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new DenyAllApprovalPolicy(),
-      reasoningSummary: "detailed",
     });
 
     await runner.run("explain the project");
 
-    expect(model.requests[0]?.reasoningSummary).toBe("detailed");
+    expect(model.requests[0]?.reasoningSummary).toBe("auto");
   });
 
   it("streams by default and forwards model deltas", async () => {

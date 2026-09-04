@@ -15,10 +15,10 @@ import { createTempDirectoryFixture } from "./test-utils.js";
 const createTempDirectory = createTempDirectoryFixture();
 
 const config: AppConfig = {
-  defaults: { reasoningEffort: "medium", reasoningSummary: "detailed" },
+  defaults: { reasoningEffort: "medium" },
   connections: [
     { apiKey: "first-fixture-key", baseUrl: "https://first.test/v1", models: [{ id: "shared", supportedReasoningEfforts: ["low", "medium", "high"] }] },
-    { apiKey: "second-fixture-key", baseUrl: "https://second.test/v1", models: [{ id: "shared", reasoningSummary: "off", reasoningEffort: "low", supportedReasoningEfforts: ["low", "high"] }, { id: "other", reasoningEffort: "high" }] },
+    { apiKey: "second-fixture-key", baseUrl: "https://second.test/v1", models: [{ id: "shared", reasoningEffort: "low", supportedReasoningEfforts: ["low", "high"] }, { id: "other", reasoningEffort: "high" }] },
   ],
 };
 
@@ -46,13 +46,13 @@ describe("ConfiguredModel", () => {
         },
       }),
     }));
-    await model.respond(request);
-    await model.respond({ ...request, model: "2:shared", reasoningSummary: "auto" });
+    await model.respond({ ...request, reasoningSummary: "auto" });
+    await model.respond({ ...request, model: "2:shared" });
     expect(sent).toMatchObject([
-      { url: "https://first.test/v1/responses", authorization: "Bearer first-fixture-key", body: { model: "shared", reasoning: { summary: "detailed" } } },
+      { url: "https://first.test/v1/responses", authorization: "Bearer first-fixture-key", body: { model: "shared", reasoning: { summary: "auto" } } },
       { url: "https://second.test/v1/responses", authorization: "Bearer second-fixture-key", body: { model: "shared" } },
     ]);
-    expect(sent[0]!.body.reasoning).toEqual({ summary: "detailed", effort: "medium" });
+    expect(sent[0]!.body.reasoning).toEqual({ summary: "auto", effort: "medium" });
     expect(sent[1]!.body.reasoning).toEqual({ effort: "low" });
   });
 
@@ -107,7 +107,7 @@ describe("ConfiguredModel", () => {
     } });
   });
 
-  it("validates requested effort before opening a connection and honors overrides for normal and summary requests", async () => {
+  it("validates requested effort before opening a connection and honors request overrides", async () => {
     const sent: ModelRequest[] = [];
     let clients = 0;
     const model = new ConfiguredModel(config, () => {

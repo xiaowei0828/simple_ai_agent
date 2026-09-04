@@ -7,7 +7,7 @@ import { createTempDirectoryFixture } from "./test-utils.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+  return { ...actual, open: vi.fn(actual.open), writeFile: vi.fn(actual.writeFile) };
 });
 
 const createTempDirectory = createTempDirectoryFixture();
@@ -15,7 +15,10 @@ async function fixture(): Promise<string> {
   return createTempDirectory("simple-agent-patch-");
 }
 
-afterEach(() => vi.mocked(fs.writeFile).mockReset());
+afterEach(() => {
+  vi.mocked(fs.open).mockReset();
+  vi.mocked(fs.writeFile).mockReset();
+});
 
 function apply(root: string, body: string): Promise<unknown> {
   const tool = createApplyPatchTool();
@@ -200,5 +203,47 @@ describe("apply_patch", () => {
       .rejects.toThrow(/simulated disk failure.*Completed operations: first.txt.*first.txt, second.txt/);
     expect(await fs.readFile(path.join(root, "first.txt"), "utf8")).toBe("first\n");
     await expect(fs.lstat(path.join(root, "second.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("allows ctime changes caused by opening an existing file for writing", async () => {
+    const root = await fixture();
+    const file = path.join(root, "file.txt");
+    await fs.writeFile(file, "before\n");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+      const handle = await actual.open(...args);
+      const stat = handle.stat.bind(handle);
+      vi.spyOn(handle, "stat").mockImplementationOnce(async () => {
+        const current = await stat();
+        Object.defineProperty(current, "ctimeMs", { value: current.ctimeMs + 1 });
+        return current;
+      });
+      return handle;
+    });
+
+    await apply(root, "*** Update File: file.txt\n@@\n-before\n+after");
+
+    expect(await fs.readFile(file, "utf8")).toBe("after\n");
+  });
+
+  it("still rejects non-ctime changes after opening an existing file for writing", async () => {
+    const root = await fixture();
+    const file = path.join(root, "file.txt");
+    await fs.writeFile(file, "before\n");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+      const handle = await actual.open(...args);
+      const stat = handle.stat.bind(handle);
+      vi.spyOn(handle, "stat").mockImplementationOnce(async () => {
+        const current = await stat();
+        Object.defineProperty(current, "mtimeMs", { value: current.mtimeMs + 1 });
+        return current;
+      });
+      return handle;
+    });
+
+    await expect(apply(root, "*** Update File: file.txt\n@@\n-before\n+after"))
+      .rejects.toThrow("File changed while preparing the patch");
+    expect(await fs.readFile(file, "utf8")).toBe("before\n");
   });
 });

@@ -26,8 +26,7 @@ npm install
 {
   "defaults": {
     "model": "model-a",
-    "reasoningEffort": "medium",
-    "reasoningSummary": "auto"
+    "reasoningEffort": "medium"
   },
   "connections": [
     {

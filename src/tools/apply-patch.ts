@@ -95,12 +95,16 @@ async function prepareChanges(
   return changes;
 }
 
-function checkSnapshot(change: PreparedChange, current: Stats | undefined): void {
+function checkSnapshot(
+  change: PreparedChange,
+  current: Stats | undefined,
+  options: { ignoreCtime?: boolean } = {},
+): void {
   const before = change.before;
   if (before === undefined ? current !== undefined : (
     current === undefined || current.dev !== before.dev || current.ino !== before.ino ||
     current.size !== before.size || current.mtimeMs !== before.mtimeMs ||
-    current.ctimeMs !== before.ctimeMs || current.mode !== before.mode
+    (!options.ignoreCtime && current.ctimeMs !== before.ctimeMs) || current.mode !== before.mode
   )) {
     throw new Error(`File changed while preparing the patch: ${change.patch.path}. Read it and retry.`);
   }
@@ -113,7 +117,9 @@ async function assertUnchanged(change: PreparedChange): Promise<void> {
 async function writeUpdatedFile(change: PreparedChange): Promise<void> {
   const handle = await open(change.source, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
   try {
-    checkSnapshot(change, await handle.stat());
+    // A provenance-sandboxed macOS process may add com.apple.provenance on the
+    // first writable open. That changes ctime without changing file contents.
+    checkSnapshot(change, await handle.stat(), { ignoreCtime: true });
     await handle.writeFile(change.content!, "utf8");
     await handle.truncate(Buffer.byteLength(change.content!, "utf8"));
   } finally {

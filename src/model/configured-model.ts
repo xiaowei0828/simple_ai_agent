@@ -31,7 +31,6 @@ export class ConfiguredModel implements ModelAdapter {
     return client.respond({
       ...request,
       model: selected.model,
-      reasoningSummary: request.purpose === "compaction" ? undefined : selected.reasoningSummary,
       reasoningEffort,
     });
   }

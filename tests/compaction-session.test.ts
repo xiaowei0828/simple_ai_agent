@@ -288,7 +288,7 @@ describe("compacted sessions", () => {
   it("sends a dedicated summary API request on the selected connection and gives debug traces a separate row", async () => {
     const { root, store, id } = await fixture();
     const sent: Array<{ body: Record<string, unknown>; url: string; authorization: string | null }> = [];
-    const model = new ConfiguredModel({ defaults: { reasoningSummary: "detailed", reasoningEffort: "low" },
+    const model = new ConfiguredModel({ defaults: { reasoningEffort: "low" },
       connections: [{ apiKey: "fixture-key", baseUrl: "https://selected.test/v1", models: [{ id: "test" }] }] },
       (config) => new OpenAIModel({ traceSink: store, client: new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl, maxRetries: 0,
         fetch: async (url, init) => {
@@ -315,7 +315,7 @@ describe("compacted sessions", () => {
     expect(sent[0]!.body.stream).not.toBe(true);
     expect(sent[0]!.body).not.toHaveProperty("previous_response_id");
     expect(sent[0]!.body.reasoning).toEqual({ effort: "high" });
-    expect(sent[1]!.body).toMatchObject({ store: true, parallel_tool_calls: true, reasoning: { summary: "detailed", effort: "high" }, instructions: "agent instructions" });
+    expect(sent[1]!.body).toMatchObject({ store: true, parallel_tool_calls: true, reasoning: { summary: "auto", effort: "high" }, instructions: "agent instructions" });
     expect(sent[1]!.body).not.toHaveProperty("tool_choice");
     expect(sent[1]!.body).not.toHaveProperty("previous_response_id");
     const raw = await readFile(store.filePath(id), "utf8");
