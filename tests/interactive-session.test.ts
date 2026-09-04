@@ -1,21 +1,17 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { runInteractiveSession, type InteractiveAgent, type InteractiveSessionOptions } from "../src/cli/interactive-session.js";
 import type { AgentRunOptions } from "../src/core/agent-runner.js";
 import type { AgentRunResult } from "../src/core/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { JsonlConversationStore } from "../src/history/session-store.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
 
-const roots: string[] = [];
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
+const createTempDirectory = createTempDirectoryFixture();
 
 async function createStore(): Promise<JsonlConversationStore> {
-  const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-session-"));
-  roots.push(root);
+  const root = await createTempDirectory("simple-code-agent-session-");
   return new JsonlConversationStore(path.join(root, ".agent-runs"));
 }
 
@@ -28,6 +24,23 @@ async function runSession(
     historyStore: options.historyStore ?? await createStore(),
     initialModel: options.initialModel ?? "test-model",
   });
+}
+
+function scriptedIO(
+  inputs: string[],
+  outputs: { assistant?: string[]; status?: string[] } = {},
+): InteractiveSessionOptions["io"] {
+  return {
+    async prompt() {
+      return inputs.shift();
+    },
+    writeAssistant(output) {
+      outputs.assistant?.push(output);
+    },
+    writeStatus(output) {
+      outputs.status?.push(output);
+    },
+  };
 }
 
 class FakeInteractiveAgent implements InteractiveAgent {
@@ -72,17 +85,7 @@ describe("runInteractiveSession", () => {
 
     await runSession({
       agent,
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant(output) {
-          assistantOutputs.push(output);
-        },
-        writeStatus(output) {
-          statusOutputs.push(output);
-        },
-      },
+      io: scriptedIO(inputs, { assistant: assistantOutputs, status: statusOutputs }),
     });
 
     expect(agent.calls).toEqual([
@@ -116,15 +119,7 @@ describe("runInteractiveSession", () => {
       agent,
       initialModel: "model-a",
       availableModels: ["model-a", "model-b"],
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus(output) {
-          statuses.push(output);
-        },
-      },
+      io: scriptedIO(inputs, { status: statuses }),
     });
 
     expect(agent.calls).toEqual([
@@ -149,7 +144,7 @@ describe("runInteractiveSession", () => {
     await runSession({
       agent: { run: (task, options) => agent.run(task, options), async compact(options) { compactOptions.push(options); return undefined; } },
       historyStore: store, reasoningConfig,
-      io: { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus(text) { statuses.push(text); } },
+      io: scriptedIO(inputs, { status: statuses }),
     });
     expect(agent.calls.map((call) => call.options?.reasoningEffort)).toEqual(["medium", "high"]);
     expect(agent.calls[1]!.options?.previousResponseId).toBe("response-1");
@@ -169,7 +164,7 @@ describe("runInteractiveSession", () => {
     const resumed = new FakeInteractiveAgent();
     const resume = [saved.id, "continue", "/reasoning mid", "continue again", "/exit"];
     await runSession({ agent: resumed, historyStore: store, reasoningConfig,
-      io: { async prompt() { return resume.shift(); }, writeAssistant() {}, writeStatus() {} },
+      io: scriptedIO(resume),
     });
     expect(resumed.calls.map((call) => call.options?.reasoningEffort)).toEqual(["high", "medium"]);
     expect(resumed.calls[0]!.options?.previousResponseId).toBeUndefined();
@@ -185,7 +180,7 @@ describe("runInteractiveSession", () => {
     const statuses: string[] = [];
     await runSession({ agent, historyStore: store,
       reasoningConfig: () => ({ reasoningEffort: "medium", supportedReasoningEfforts: ["medium"] }),
-      io: { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus(text) { statuses.push(text); } },
+      io: scriptedIO(inputs, { status: statuses }),
     });
     expect(agent.calls[0]!.options?.reasoningEffort).toBe("medium");
     expect(statuses.some((text) => text.includes("using medium"))).toBe(true);
@@ -204,15 +199,7 @@ describe("runInteractiveSession", () => {
         traceViews += 1;
         return "C:\\workspace\\.agent-runs\\latest.html";
       },
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus(output) {
-          statuses.push(output);
-        },
-      },
+      io: scriptedIO(inputs, { status: statuses }),
     });
 
     expect(traceViews).toBe(1);
@@ -229,13 +216,7 @@ describe("runInteractiveSession", () => {
       agent: firstAgent,
       historyStore: store,
       initialModel: "test-model",
-      io: {
-        async prompt() {
-          return firstInputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus() {},
-      },
+      io: scriptedIO(firstInputs),
     });
 
     const secondAgent = new FakeInteractiveAgent();
@@ -246,15 +227,7 @@ describe("runInteractiveSession", () => {
       historyStore: store,
       initialModel: "another-model",
       availableModels: ["another-model", "test-model"],
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus(output) {
-          statuses.push(output);
-        },
-      },
+      io: scriptedIO(inputs, { status: statuses }),
     });
 
     expect(secondAgent.calls).toEqual([
@@ -287,7 +260,7 @@ describe("runInteractiveSession", () => {
     const inputs = [...prefix, "follow up", "again", "/exit"];
     await runSession({
       agent, historyStore: store,
-      io: { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus() {} },
+      io: scriptedIO(inputs),
     });
     const resumedIndex = entry === "startup" ? 0 : 1;
     expect(agent.calls).toHaveLength(resumedIndex + 2);
@@ -332,13 +305,7 @@ describe("runInteractiveSession", () => {
       },
       historyStore: store,
       initialModel: "test-model",
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus() {},
-      },
+      io: scriptedIO(inputs),
     });
 
     const persisted = await store.load(conversation.id);
@@ -368,15 +335,7 @@ describe("runInteractiveSession", () => {
       agent: new FakeInteractiveAgent(),
       historyStore: store,
       initialModel: "test-model",
-      io: {
-        async prompt() {
-          return inputs.shift();
-        },
-        writeAssistant() {},
-        writeStatus(output) {
-          statuses.push(output);
-        },
-      },
+      io: scriptedIO(inputs, { status: statuses }),
     });
 
     expect((await store.load(conversation.id)).title).toBe("New title");

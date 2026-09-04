@@ -1,16 +1,22 @@
-import { mkdtemp, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createConversationTitle,
   JsonlConversationStore,
 } from "../src/history/session-store.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
+
+const createTempDirectory = createTempDirectoryFixture();
+
+async function fixtureDirectory(): Promise<string> {
+  const root = await createTempDirectory("simple-code-agent-history-");
+  return path.join(root, ".agent-runs");
+}
 
 describe("JsonlConversationStore", () => {
   it("creates, updates, renames, and lists conversations", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-history-"));
-    const historyDirectory = path.join(root, ".agent-runs");
+    const historyDirectory = await fixtureDirectory();
     const store = new JsonlConversationStore(historyDirectory);
     const firstTurn = {
       user: "first question",
@@ -54,8 +60,7 @@ describe("JsonlConversationStore", () => {
   });
 
   it("skips invalid history files while listing", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-history-"));
-    const historyDirectory = path.join(root, ".agent-runs");
+    const historyDirectory = await fixtureDirectory();
     const warnings: string[] = [];
     const store = new JsonlConversationStore(historyDirectory, {
       onWarning(message) {

@@ -98,6 +98,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
     if (!task) continue;
 
     const [command = "", ...commandArguments] = task.split(/\s+/u);
+    const commandArgument = commandArguments.join(" ");
     switch (command.toLowerCase()) {
       case "/exit":
       case "/quit":
@@ -115,7 +116,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         }
         continue;
       case "/resume": {
-        const selector = commandArguments.join(" ").trim();
+        const selector = commandArgument;
         if (!selector) {
           options.io.writeStatus("Usage: /resume <number|id>");
           continue;
@@ -145,7 +146,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           options.io.writeStatus("There is no saved current conversation to rename.");
           continue;
         }
-        const title = commandArguments.join(" ").trim();
+        const title = commandArgument;
         if (!title) {
           options.io.writeStatus("Usage: /rename <title>");
           continue;
@@ -177,7 +178,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
             model: currentModel, history: replayConversation(currentConversation),
             reasoningEffort: currentReasoningEffort,
             summary: currentConversation.summary, contextUsage: currentConversation.contextUsage,
-          }, commandArguments.join(" ") || undefined);
+          }, commandArgument || undefined);
           if (result) {
             previousResponseId = undefined;
             currentConversation = await options.historyStore.load(currentConversation.id);
@@ -202,7 +203,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
             options.io.writeStatus("Reasoning selection is unavailable in this session.");
             continue;
           }
-          const selector = commandArguments.join(" ").toLowerCase();
+          const selector = commandArgument.toLowerCase();
           if (!selector) {
             options.io.writeStatus(`Reasoning effort: ${currentReasoningEffort}. Supported: ${config.supportedReasoningEfforts.join(", ")}. Use /reasoning <effort>.`);
             continue;
@@ -223,7 +224,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         continue;
       }
       case "/model": {
-        const selector = commandArguments.join(" ").trim();
+        const selector = commandArgument;
         if (!selector) {
           options.io.writeStatus(formatModelList(availableModels, currentModel));
           continue;
@@ -247,7 +248,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         continue;
       }
       case "/trace":
-        if (commandArguments.length > 0) {
+        if (commandArgument) {
           options.io.writeStatus("Usage: /trace");
           continue;
         }

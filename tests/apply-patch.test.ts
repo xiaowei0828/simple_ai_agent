@@ -1,26 +1,21 @@
 import * as fs from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApplyPatchTool } from "../src/tools/apply-patch.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return { ...actual, writeFile: vi.fn(actual.writeFile) };
 });
 
-const roots: string[] = [];
+const createTempDirectory = createTempDirectoryFixture();
 async function fixture(): Promise<string> {
-  const root = await fs.mkdtemp(path.join(tmpdir(), "simple-agent-patch-"));
-  roots.push(root);
-  return root;
+  return createTempDirectory("simple-agent-patch-");
 }
 
-afterEach(async () => {
-  vi.mocked(fs.writeFile).mockReset();
-  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
-});
+afterEach(() => vi.mocked(fs.writeFile).mockReset());
 
 function apply(root: string, body: string): Promise<unknown> {
   const tool = createApplyPatchTool();

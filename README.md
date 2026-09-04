@@ -59,6 +59,7 @@ npm run dev -- --workspace .
 ```json
 {
   "defaults": {
+    "model": "model-a",
     "reasoningEffort": "medium",
     "reasoningSummary": "auto"
   },
@@ -84,9 +85,10 @@ npm run dev -- --workspace .
 }
 ```
 
-默认使用 `connections` 中第一个连接的第一个模型。`models` 中每项是模型对象，`id` 是发送给服务端的模型名。`defaults` 可省略，用于统一设置推理默认值；模型可以单独覆盖。上下文窗口和允许的推理档位保留在模型配置中，同一个 API 连接下可以不同。`/model` 列出所有连接的模型；同名模型通过配置编号区分，例如 `1:shared-model`、`2:shared-model`。
+默认使用 `defaults.model` 指定的模型；省略时仍使用 `connections` 中第一个连接的第一个模型。`models` 中每项是模型对象，`id` 是发送给服务端的模型名。`defaults` 可省略，用于统一设置默认模型和推理默认值；模型可以单独覆盖推理设置。上下文窗口和允许的推理档位保留在模型配置中，同一个 API 连接下可以不同。`/model` 列出所有连接的模型；同名模型通过配置编号区分，例如 `1:shared-model`、`2:shared-model`，作为默认模型时也必须使用该编号选择器。
 
 - `contextWindow`：模型服务实际提供的上下文容量，单位为 token。配置后启用历史压缩；压缩策略使用代码默认值，无需填写 `compaction`。
+- `model`：启动时使用的默认模型，值需与 `/model` 列出的选择器一致。命令中显式选择模型时会覆盖此默认值。
 - `reasoningEffort`：推理强度，按“会话选择 → 模型配置 → `defaults` → 代码默认值 `medium`”取值，发送为 `reasoning.effort`。
 - `reasoningSummary`：是否请求推理摘要及其详略，支持 `off`、`auto`、`concise`、`detailed`，按“模型配置 → `defaults` → 代码默认值 `auto`”取值。`off` 只关闭推理摘要请求，不等于关闭推理。
 - `supportedReasoningEfforts`：该模型允许选择的档位，继承或覆盖后的默认档位必须在列表中，列表不能为空或重复。客户端识别 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略列表时开放这些档位。这是配置声明，不会自动探测服务端能力，应按对应模型服务支持的值填写。

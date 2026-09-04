@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import OpenAI from "openai";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AgentRunner } from "../src/core/agent-runner.js";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "../src/core/types.js";
 import { runInteractiveSession } from "../src/cli/interactive-session.js";
@@ -12,14 +11,13 @@ import { OpenAIModel } from "../src/model/openai-model.js";
 import { AllowAllApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
 
-const roots: string[] = [];
+const createTempDirectory = createTempDirectoryFixture();
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-journal-"));
-  roots.push(root);
+  const root = await createTempDirectory("simple-code-agent-journal-");
   return { root, directory: path.join(root, ".agent-runs") };
 }
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 function io(inputs: string[]) {
   return { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus() {} };

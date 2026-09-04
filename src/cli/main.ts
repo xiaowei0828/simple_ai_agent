@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   }
   const configPath = resolveAppConfigPath();
   const appConfig = await loadAppConfig(configPath);
-  const runtimeConfig = resolveRuntimeModelConfig(appConfig);
+  const initialModel = resolveRuntimeModelConfig(appConfig).selector;
 
   const workspaceRoot = await realpath(path.resolve(options.workspace));
   if (!(await stat(workspaceRoot)).isDirectory()) throw new Error("--workspace must point to a directory.");
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
         baseURL: connection.baseUrl,
         traceSink: options.debug ? historyStore : undefined,
       })),
-      modelName: runtimeConfig.selector,
+      modelName: initialModel,
       instructions: buildAgentInstructions(projectInstructions, skillCatalog.content, documents),
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot },
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
 
     await runInteractiveSession({
       agent: runner,
-      initialModel: runtimeConfig.selector,
+      initialModel,
       availableModels: listConfiguredModels(appConfig).map((choice) => choice.selector),
       reasoningConfig: (model) => resolveRuntimeModelConfig(appConfig, model),
       historyStore,

@@ -1,11 +1,9 @@
 import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
 import type {
-  FunctionTool,
   Response as OpenAIResponse,
   ResponseCreateParamsNonStreaming,
   ResponseCreateParamsStreaming,
-  ResponseInputItem,
 } from "openai/resources/responses/responses";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "../core/types.js";
 import type { OpenAIErrorTrace, OpenAITraceSink } from "../logging/openai-trace.js";
@@ -70,19 +68,16 @@ export class OpenAIModel implements ModelAdapter {
 
   async #respondOnce(request: ModelRequest): Promise<ModelResponse> {
     const compacting = request.purpose === "compaction";
-    const input = typeof request.input === "string"
-      ? request.input
-      : request.input as ResponseInputItem[];
 
     const nonStreamingBody: ResponseCreateParamsNonStreaming = {
       model: request.model,
       instructions: request.instructions,
-      input,
+      input: request.input as ResponseCreateParamsNonStreaming["input"],
       previous_response_id: request.previousResponseId,
       reasoning: request.reasoningSummary || request.reasoningEffort
         ? { summary: request.reasoningSummary, effort: request.reasoningEffort }
         : undefined,
-      tools: request.tools as FunctionTool[],
+      tools: request.tools,
       tool_choice: compacting ? "none" : undefined,
       parallel_tool_calls: compacting ? false : this.#parallelToolCalls,
       store: !compacting,

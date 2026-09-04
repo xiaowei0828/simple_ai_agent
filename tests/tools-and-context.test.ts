@@ -1,5 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildAgentInstructions } from "../src/context/build-instructions.js";
@@ -12,11 +11,14 @@ import {
   createWorkspacePathResolver,
 } from "../src/policy/path-policy.js";
 import { walkFiles } from "../src/context/walk-files.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
+
+const createTempDirectory = createTempDirectoryFixture();
 
 describe("workspace path policy", () => {
   it("blocks lexical and symbolic-link workspace escapes", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-root-"));
-    const outside = await mkdtemp(path.join(tmpdir(), "simple-code-agent-outside-"));
+    const root = await createTempDirectory("simple-code-agent-root-");
+    const outside = await createTempDirectory("simple-code-agent-outside-");
     await writeFile(path.join(outside, "secret.txt"), "secret", "utf8");
     await symlink(outside, path.join(root, "escape"));
 
@@ -25,7 +27,7 @@ describe("workspace path policy", () => {
   });
 
   it("blocks common secret files", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-secret-"));
+    const root = await createTempDirectory("simple-code-agent-secret-");
     await writeFile(path.join(root, ".env"), "TOKEN=secret", "utf8");
     await expect(resolveExistingWorkspacePath(root, ".env")).rejects.toThrow("sensitive");
   });
@@ -42,7 +44,7 @@ describe("workspace path policy", () => {
   });
 
   it("blocks agent trace paths in the workspace resolver", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-trace-policy-"));
+    const root = await createTempDirectory("simple-code-agent-trace-policy-");
     await mkdir(path.join(root, ".agent-runs"));
     await writeFile(path.join(root, ".agent-runs", "run.jsonl"), "{}\n", "utf8");
     await mkdir(path.join(root, ".agent-history"));
@@ -54,7 +56,7 @@ describe("workspace path policy", () => {
   });
 
   it("blocks local application configuration in the workspace resolver", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-config-policy-"));
+    const root = await createTempDirectory("simple-code-agent-config-policy-");
     await mkdir(path.join(root, ".config"));
     await writeFile(path.join(root, ".config", "config.json"), "{}\n", "utf8");
 
@@ -68,7 +70,7 @@ describe("workspace path policy", () => {
   });
 
   it("rechecks protected paths after resolving symbolic links", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-canonical-policy-"));
+    const root = await createTempDirectory("simple-code-agent-canonical-policy-");
     const protectedDirectory = path.join(root, ".config");
     const sensitiveDirectory = path.join(root, ".env");
     await mkdir(protectedDirectory);
@@ -102,7 +104,7 @@ describe("workspace path policy", () => {
 
 describe("workspace file discovery", () => {
   it("stops streaming a large directory at the explicit entry budget", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-walk-budget-"));
+    const root = await createTempDirectory("simple-code-agent-walk-budget-");
     await Promise.all(Array.from({ length: 10 }, (_, index) => (
       writeFile(path.join(root, `file-${index}.txt`), "value", "utf8")
     )));
@@ -118,7 +120,7 @@ describe("workspace file discovery", () => {
   });
 
   it("applies a discovery filter before consuming the file budget", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-walk-filter-"));
+    const root = await createTempDirectory("simple-code-agent-walk-filter-");
     await writeFile(path.join(root, "a.log"), "ignore", "utf8");
     await writeFile(path.join(root, "b.log"), "ignore", "utf8");
     await writeFile(path.join(root, "target.ts"), "include", "utf8");
@@ -170,7 +172,7 @@ describe("context discovery", () => {
   });
 
   it("loads hierarchical AGENTS files and prefers an override", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-instructions-"));
+    const root = await createTempDirectory("simple-code-agent-instructions-");
     const child = path.join(root, "packages", "app");
     await mkdir(child, { recursive: true });
     await writeFile(path.join(root, "AGENTS.md"), "root rule", "utf8");
@@ -186,7 +188,7 @@ describe("context discovery", () => {
   });
 
   it("accepts a workspace child whose name begins with two dots", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-dot-directory-"));
+    const root = await createTempDirectory("simple-code-agent-dot-directory-");
     const child = path.join(root, "..notes");
     await mkdir(child);
     await writeFile(path.join(child, "AGENTS.md"), "child rule", "utf8");
@@ -195,7 +197,7 @@ describe("context discovery", () => {
   });
 
   it("discovers skill metadata without loading unrelated assets", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-skills-"));
+    const root = await createTempDirectory("simple-code-agent-skills-");
     const skillDirectory = path.join(root, "review");
     await mkdir(skillDirectory);
     await writeFile(path.join(skillDirectory, "SKILL.md"), `---
@@ -215,7 +217,7 @@ routing: Targeted code review.
   });
 
   it("indexes Markdown paths and headings without treating AGENTS.md as a regular document", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-docs-"));
+    const root = await createTempDirectory("simple-code-agent-docs-");
     await mkdir(path.join(root, "docs"));
     await writeFile(path.join(root, "AGENTS.md"), "agent rules", "utf8");
     await writeFile(path.join(root, "docs", "architecture.md"), "# Runtime architecture\n\nDetails", "utf8");

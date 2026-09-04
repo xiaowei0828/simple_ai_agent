@@ -1,5 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { describe, expect, it, vi } from "vitest";
@@ -9,6 +8,9 @@ import {
 } from "../src/policy/approval-policy.js";
 import { resolveRuntimeShell, shellInvocation } from "../src/tools/process-runner.js";
 import { createRunCommandTool } from "../src/tools/run-command.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
+
+const createTempDirectory = createTempDirectoryFixture();
 
 describe("approval policy", () => {
   it("auto-approves workspace file tools and delegates every run_command", async () => {
@@ -37,7 +39,6 @@ describe("approval policy", () => {
 
     expect(fallbackRequests).toEqual(["run_command", "unknown_write_tool"]);
   });
-
 });
 
 describe("shell invocation", () => {
@@ -83,7 +84,7 @@ describe("run_command", () => {
   it.runIf(process.platform === "darwin" && ["x64", "arm64"].includes(process.arch))(
     "uses bundled rg without a system PATH and respects ignored files in another workspace",
     async () => {
-      const root = await mkdtemp(path.join(tmpdir(), "simple-agent rg-"));
+      const root = await createTempDirectory("simple-agent rg-");
       try {
         await mkdir(path.join(root, ".git"));
         await writeFile(path.join(root, ".gitignore"), "ignored.txt\n");
@@ -103,7 +104,6 @@ describe("run_command", () => {
         expect(result.output).not.toContain("ignored.txt");
       } finally {
         vi.unstubAllEnvs();
-        await rm(root, { recursive: true, force: true });
       }
     },
   );
@@ -170,7 +170,7 @@ describe("run_command", () => {
   });
 
   it("applies defaults but rejects a cwd outside the workspace", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-run-command-path-"));
+    const root = await createTempDirectory("simple-code-agent-run-command-path-");
     const tool = createRunCommandTool();
     const input = tool.parse({ command: "node --version" });
 

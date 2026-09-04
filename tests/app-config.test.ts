@@ -1,7 +1,6 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { REASONING_EFFORTS } from "../src/core/types.js";
 import {
   listConfiguredModels,
@@ -9,6 +8,7 @@ import {
   resolveRuntimeModelConfig,
   type AppConfig,
 } from "../src/config/app-config.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
 
 const config: AppConfig = {
   connections: [
@@ -17,15 +17,19 @@ const config: AppConfig = {
   ],
 };
 
+const createTempDirectory = createTempDirectoryFixture();
+
 async function configFile(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-config-"));
+  const root = await createTempDirectory("simple-code-agent-config-");
   return path.join(root, "config.json");
 }
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("application configuration", () => {
   it("loads an optional defaults block alongside multiple API connections", async () => {
     const configPath = await configFile();
-    for (const defaults of [undefined, {}, { reasoningEffort: "medium", reasoningSummary: "auto" }]) {
+    for (const defaults of [undefined, {}, { model: "model-c", reasoningEffort: "medium", reasoningSummary: "auto" }]) {
       const input = { ...config, ...(defaults ? { defaults } : {}) };
       await writeFile(configPath, JSON.stringify(input), "utf8");
       await expect(loadAppConfig(configPath)).resolves.toEqual(input);
@@ -39,13 +43,9 @@ describe("application configuration", () => {
   it("uses configuration values even when SDK environment variables are set", () => {
     vi.stubEnv("OPENAI_API_KEY", "environment-fixture-key");
     vi.stubEnv("OPENAI_BASE_URL", "https://environment.test/v1");
-    try {
-      expect(resolveRuntimeModelConfig(config, "model-c")).toMatchObject({
-        apiKey: "second-key", baseUrl: "https://second.test/v1", model: "model-c",
-      });
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    expect(resolveRuntimeModelConfig(config, "model-c")).toMatchObject({
+      apiKey: "second-key", baseUrl: "https://second.test/v1", model: "model-c",
+    });
   });
 
   it("uses code defaults and selects models across connections", () => {
@@ -60,6 +60,16 @@ describe("application configuration", () => {
       reasoningEffort: "medium", supportedReasoningEfforts: REASONING_EFFORTS,
     });
     expect(resolveRuntimeModelConfig(config, "model-a").reasoningSummary).toBe("auto");
+  });
+
+  it("uses the configured default model while allowing an explicit selection to override it", () => {
+    const withDefault: AppConfig = { ...config, defaults: { model: "model-c" } };
+    expect(resolveRuntimeModelConfig(withDefault)).toMatchObject({
+      connectionIndex: 1, selector: "model-c", model: "model-c",
+    });
+    expect(resolveRuntimeModelConfig(withDefault, "model-a")).toMatchObject({
+      connectionIndex: 0, selector: "model-a", model: "model-a",
+    });
   });
 
   it("resolves shared defaults before validating per-model overrides and supported efforts", async () => {
@@ -104,6 +114,21 @@ describe("application configuration", () => {
     });
     expect(() => resolveRuntimeModelConfig(shared, "shared")).toThrow("multiple connections");
     expect(() => resolveRuntimeModelConfig(shared, "missing")).toThrow("Unknown model");
+    expect(resolveRuntimeModelConfig({ ...shared, defaults: { model: "2:shared" } })).toMatchObject({
+      connectionIndex: 1, selector: "2:shared", model: "shared",
+    });
+  });
+
+  it("rejects an unknown or ambiguous default model", async () => {
+    const configPath = await configFile();
+    const shared = { connections: [
+      { ...config.connections[0]!, models: [{ id: "shared" }] },
+      { ...config.connections[1]!, models: [{ id: "shared" }] },
+    ] };
+    for (const model of ["missing", "shared"]) {
+      await writeFile(configPath, JSON.stringify({ ...shared, defaults: { model } }));
+      await expect(loadAppConfig(configPath)).rejects.toThrow("defaults.model");
+    }
   });
 
   it("rejects the old root array and malformed connection/model lists", async () => {
@@ -146,10 +171,11 @@ describe("application configuration", () => {
     await expect(loadAppConfig(configPath)).rejects.toThrow("connections.0.models.0.reasoningEffort: effective reasoning effort 'max'");
   });
 
-  it("accepts only reasoning defaults in the shared block", async () => {
+  it("accepts only model and reasoning defaults in the shared block", async () => {
     const configPath = await configFile();
     for (const defaults of [
       { reasoningEffort: "invalid" }, { reasoningSummary: "invalid" },
+      { model: "" },
       { contextWindow: 300_000 }, { supportedReasoningEfforts: ["medium"] },
     ]) {
       await writeFile(configPath, JSON.stringify({ ...config, defaults }));

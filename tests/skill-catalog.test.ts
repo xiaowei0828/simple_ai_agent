@@ -1,5 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createSkillCatalog, MAX_SKILL_CATALOG_CHARS } from "../src/context/skill-catalog.js";
@@ -8,6 +7,9 @@ import { buildAgentInstructions } from "../src/context/build-instructions.js";
 import { AgentRunner } from "../src/core/agent-runner.js";
 import type { ModelRequest, ModelResponse, ToolCallOutput } from "../src/core/types.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
+
+const createTempDirectory = createTempDirectoryFixture();
 
 function quotePath(filePath: string): string {
   return process.platform === "win32"
@@ -32,28 +34,24 @@ function commandOutput(request: ModelRequest): string {
 
 describe("skill catalog", () => {
   it("preserves complete descriptions and absolute paths without loading a large skill body", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-agent-skill-body-"));
+    const root = await createTempDirectory("simple-agent-skill-body-");
+    const skillDir = path.join(root, "review");
+    await mkdir(skillDir);
+    const description = `${"Detailed trigger information. ".repeat(10)}unique-tail-trigger`;
+    await writeFile(path.join(skillDir, "SKILL.md"),
+      `---\nname: review\ndescription: ${description}\n---\n${"BODY-ONLY\n".repeat(100_000)}`);
+    const catalog = await createSkillCatalog(await discoverSkills([root]));
     try {
-      const skillDir = path.join(root, "review");
-      await mkdir(skillDir);
-      const description = `${"Detailed trigger information. ".repeat(10)}unique-tail-trigger`;
-      await writeFile(path.join(skillDir, "SKILL.md"),
-        `---\nname: review\ndescription: ${description}\n---\n${"BODY-ONLY\n".repeat(100_000)}`);
-      const catalog = await createSkillCatalog(await discoverSkills([root]));
-      try {
-        expect(catalog.indexPath).toBeUndefined();
-        expect(catalog.content).toContain(description);
-        expect(catalog.content).toContain(JSON.stringify(path.join(skillDir, "SKILL.md")));
-        expect(catalog.content).not.toContain("BODY-ONLY");
-        expect(catalog.content.length).toBeLessThanOrEqual(MAX_SKILL_CATALOG_CHARS);
-        const instructions = buildAgentInstructions({ files: [], content: "" }, catalog.content);
-        expect(instructions).toContain(catalog.content);
-        expect(instructions).toContain("bounded line ranges until complete");
-      } finally {
-        await catalog.dispose();
-      }
+      expect(catalog.indexPath).toBeUndefined();
+      expect(catalog.content).toContain(description);
+      expect(catalog.content).toContain(JSON.stringify(path.join(skillDir, "SKILL.md")));
+      expect(catalog.content).not.toContain("BODY-ONLY");
+      expect(catalog.content.length).toBeLessThanOrEqual(MAX_SKILL_CATALOG_CHARS);
+      const instructions = buildAgentInstructions({ files: [], content: "" }, catalog.content);
+      expect(instructions).toContain(catalog.content);
+      expect(instructions).toContain("bounded line ranges until complete");
     } finally {
-      await rm(root, { recursive: true, force: true });
+      await catalog.dispose();
     }
   });
 
@@ -103,7 +101,7 @@ describe("skill catalog", () => {
   });
 
   it("finds a late skill by description and reads external skill resources through approved commands", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-agent-skills-flow-"));
+    const root = await createTempDirectory("simple-agent-skills-flow-");
     const workspace = path.join(root, "workspace");
     const skillDir = path.join(root, "skill's 中文 folder");
     await mkdir(workspace);
@@ -167,7 +165,6 @@ describe("skill catalog", () => {
       expect(approvedCommands).toHaveLength(3);
     } finally {
       await catalog.dispose();
-      await rm(root, { recursive: true, force: true });
     }
   });
 });

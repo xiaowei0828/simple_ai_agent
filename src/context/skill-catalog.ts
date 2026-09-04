@@ -13,13 +13,12 @@ export interface SkillCatalog {
 
 /** Keep metadata searchable without putting every skill into the model context. */
 export async function createSkillCatalog(skills: SkillMetadata[]): Promise<SkillCatalog> {
-  const records = skills.map((skill) => JSON.stringify({
+  const metadata = skills.map((skill) => JSON.stringify({
     name: skill.name,
     description: skill.description,
     ...(skill.routing ? { routing: skill.routing } : {}),
     filePath: path.resolve(skill.filePath),
-  }));
-  const metadata = records.join("\n");
+  })).join("\n");
   const inline = skills.length === 0 ? "" : `${skills.length} skill(s). Metadata (JSONL):\n${metadata}`;
   if (inline.length <= MAX_SKILL_CATALOG_CHARS) {
     return { content: inline, async dispose() {} };

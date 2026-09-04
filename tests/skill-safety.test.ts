@@ -1,12 +1,14 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { discoverSkills } from "../src/context/skill-registry.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
+
+const createTempDirectory = createTempDirectoryFixture();
 
 describe("skill path safety", () => {
   it("rejects a discovered SKILL.md symlink that resolves outside its declared skill directory", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "simple-code-agent-skill-discovery-"));
+    const base = await createTempDirectory("simple-code-agent-skill-discovery-");
     const root = path.join(base, "skills");
     const skillDirectory = path.join(root, "review");
     const outsideFile = path.join(base, "outside", "SKILL.md");
@@ -19,7 +21,7 @@ describe("skill path safety", () => {
   });
 
   it("reports both sources when two discovered skills declare the same name", async () => {
-    const base = await mkdtemp(path.join(tmpdir(), "simple-code-agent-skill-conflict-"));
+    const base = await createTempDirectory("simple-code-agent-skill-conflict-");
     const firstRoot = path.join(base, "first");
     const secondRoot = path.join(base, "second");
     const firstSkill = path.join(firstRoot, "review-one", "SKILL.md");

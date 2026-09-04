@@ -1,8 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import OpenAI from "openai";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AgentRunner } from "../src/core/agent-runner.js";
 import { estimateTokens } from "../src/core/context-compaction.js";
 import type { AgentEvent, ModelAdapter, ModelRequest } from "../src/core/types.js";
@@ -14,13 +13,12 @@ import { AllowAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { renderTraceReportHtml } from "../src/trace-viewer/render-html.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
 
 const contextWindow = 4_000;
-const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+const createTempDirectory = createTempDirectoryFixture();
 async function fixture() {
-  const root = await mkdtemp(path.join(tmpdir(), "agent-compaction-"));
-  roots.push(root);
+  const root = await createTempDirectory("agent-compaction-");
   const directory = path.join(root, ".agent-runs");
   const store = new JsonlConversationStore(directory);
   const session = await store.create({ model: "test", title: "compaction" });

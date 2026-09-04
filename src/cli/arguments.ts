@@ -29,7 +29,7 @@ Environment:
   CODE_AGENT_SKILL_ROOTS         Extra skill roots separated by the OS path delimiter
 
 Configuration:
-  .config/config.json            Array of API connections, each with apiKey, baseUrl, and models
+  .config/config.json            Defaults and API connections with apiKey, baseUrl, and models
 
 Examples:
   npm run dev -- --workspace .

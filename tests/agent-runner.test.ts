@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentLimitError, AgentRunner } from "../src/core/agent-runner.js";
@@ -15,6 +14,9 @@ import type {
 import { AllowAllApprovalPolicy, CallbackApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
 import { ToolRegistry } from "../src/tools/types.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
+
+const createTempDirectory = createTempDirectoryFixture();
 
 class ScriptedModel implements ModelAdapter {
   readonly requests: ModelRequest[] = [];
@@ -33,7 +35,7 @@ class ScriptedModel implements ModelAdapter {
 }
 
 async function fixture(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-"));
+  const root = await createTempDirectory("simple-code-agent-");
   await writeFile(path.join(root, "hello.ts"), "export const answer = 42;\n", "utf8");
   return root;
 }

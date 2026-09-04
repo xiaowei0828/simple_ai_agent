@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { defaultBrowserCommand } from "../src/cli/open-default-browser.js";
@@ -8,8 +7,18 @@ import { findLatestTraceFile } from "../src/trace-viewer/latest-trace.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { renderTraceReportHtml } from "../src/trace-viewer/render-html.js";
 import { createRunCommandTool } from "../src/tools/run-command.js";
+import { createTempDirectoryFixture } from "./test-utils.js";
 
 const tools = [createRunCommandTool().definition];
+const errorEntry = {
+  type: "openai.error",
+  timestamp: "2026-08-14T08:00:00.000Z",
+  traceId: "trace-error",
+  durationMs: 12,
+  error: { name: "BadRequest", message: "invalid input", status: 400 },
+};
+const errorEntryJson = JSON.stringify(errorEntry);
+const createTempDirectory = createTempDirectoryFixture();
 
 describe("trace viewer", () => {
   it("normalizes repeated request fields and pairs tool results with calls", () => {
@@ -116,15 +125,7 @@ describe("trace viewer", () => {
   });
 
   it("keeps parsing valid lines after a malformed line", () => {
-    const report = parseOpenAITraceJsonl(
-      `{not-json}\n${JSON.stringify({
-        type: "openai.error",
-        timestamp: "2026-08-14T08:00:00.000Z",
-        traceId: "trace-error",
-        durationMs: 12,
-        error: { name: "BadRequest", message: "invalid input", status: 400 },
-      })}`,
-    );
+    const report = parseOpenAITraceJsonl(`{not-json}\n${errorEntryJson}`);
 
     expect(report.warnings).toHaveLength(1);
     expect(report.turns[0]?.error).toMatchObject({ name: "BadRequest", status: 400 });
@@ -132,18 +133,11 @@ describe("trace viewer", () => {
   });
 
   it("finds the newest JSONL log and generates a standalone HTML report", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "simple-code-agent-latest-trace-"));
+    const root = await createTempDirectory("simple-code-agent-latest-trace-");
     const olderPath = path.join(root, "older.jsonl");
     const latestPath = path.join(root, "latest.jsonl");
-    const entry = JSON.stringify({
-      type: "openai.error",
-      timestamp: "2026-08-14T08:00:00.000Z",
-      traceId: "trace-error",
-      durationMs: 12,
-      error: { name: "BadRequest", message: "invalid input", status: 400 },
-    });
-    await writeFile(olderPath, entry, "utf8");
-    await writeFile(latestPath, entry, "utf8");
+    await writeFile(olderPath, errorEntryJson, "utf8");
+    await writeFile(latestPath, errorEntryJson, "utf8");
     await utimes(olderPath, new Date(1_000), new Date(1_000));
     await utimes(latestPath, new Date(2_000), new Date(2_000));
 

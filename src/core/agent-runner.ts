@@ -1,4 +1,5 @@
 import type {
+  AgentEvent,
   AgentEventHandler,
   AgentRunResult,
   ApprovalPolicy,
@@ -256,13 +257,10 @@ export class AgentLimitError extends Error {
 }
 
 export class AgentRunner {
-  readonly #options: Required<Pick<
+  readonly #options: AgentRunnerOptions & Required<Pick<
     AgentRunnerOptions,
     "maxSteps" | "maxToolOutputChars" | "stream"
-  >> & Omit<
-    AgentRunnerOptions,
-    "maxSteps" | "maxToolOutputChars" | "stream"
-  >;
+  >>;
 
   constructor(options: AgentRunnerOptions) {
     const maxToolOutputChars = options.maxToolOutputChars ?? 20_000;
@@ -445,7 +443,7 @@ export class AgentRunner {
     };
   }
 
-  async #emit(event: Parameters<NonNullable<AgentRunnerOptions["onEvent"]>>[0]): Promise<void> {
+  async #emit(event: AgentEvent): Promise<void> {
     await this.#options.onEvent?.(event);
   }
 }

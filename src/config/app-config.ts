@@ -3,14 +3,18 @@ import path from "node:path";
 import { z } from "zod";
 import { REASONING_EFFORTS, type ReasoningEffort, type ReasoningSummaryMode } from "../core/types.js";
 
-export const DEFAULT_REASONING_SUMMARY = "auto" as const;
-export const DEFAULT_REASONING_EFFORT = "medium" as const;
+const DEFAULT_REASONING_SUMMARY = "auto" as const;
+const DEFAULT_REASONING_EFFORT = "medium" as const;
 
 const effortSchema = z.enum(REASONING_EFFORTS);
 const reasoningDefaultsSchema = z.object({
   reasoningEffort: effortSchema.optional(),
   reasoningSummary: z.enum(["off", "auto", "concise", "detailed"]).optional(),
 }).strict();
+
+const defaultsSchema = reasoningDefaultsSchema.extend({
+  model: z.string().trim().min(1).optional(),
+});
 
 const modelConfigSchema = z.object({
   ...reasoningDefaultsSchema.shape,
@@ -39,12 +43,19 @@ const connectionConfigSchema = z.object({
 });
 
 const appConfigSchema = z.object({
-  defaults: reasoningDefaultsSchema.optional(),
+  defaults: defaultsSchema.optional(),
   connections: z.array(connectionConfigSchema).min(1),
 }).strict().superRefine((config, context) => {
-  const choices = listConfiguredModels(config).map((choice) => choice.selector.toLowerCase());
-  if (new Set(choices).size !== choices.length) {
+  const selectors = listConfiguredModels(config).map((choice) => choice.selector);
+  if (new Set(selectors.map((selector) => selector.toLowerCase())).size !== selectors.length) {
     context.addIssue({ code: "custom", message: "model names conflict with generated connection selectors" });
+  }
+  if (config.defaults?.model && !selectors.includes(config.defaults.model)) {
+    context.addIssue({
+      code: "custom",
+      path: ["defaults", "model"],
+      message: `unknown default model '${config.defaults.model}'`,
+    });
   }
   for (const [connectionIndex, connection] of config.connections.entries()) {
     for (const [modelIndex, model] of connection.models.entries()) {
@@ -111,7 +122,7 @@ export function resolveRuntimeModelConfig(
   model?: string,
 ): RuntimeModelConfig {
   const choices = listConfiguredModels(config);
-  const selector = model?.trim() || undefined;
+  const selector = model?.trim() || config.defaults?.model?.trim() || undefined;
   const choice = selector === undefined ? choices[0] : choices.find((entry) => entry.selector === selector);
   if (!choice) {
     const matches = choices.filter((entry) => entry.model === selector);
