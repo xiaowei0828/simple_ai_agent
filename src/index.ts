@@ -1,6 +1,11 @@
-export { AgentLimitError, AgentRunner, DEFAULT_MAX_STEPS } from "./core/agent-runner.js";
+export {
+  AgentLimitError,
+  AgentResponseError,
+  AgentRunner,
+  DEFAULT_MAX_STEPS,
+} from "./core/agent-runner.js";
 export { REASONING_EFFORTS } from "./core/types.js";
-export type { AgentRunOptions } from "./core/agent-runner.js";
+export type { AgentContinuation, AgentRunOptions } from "./core/agent-runner.js";
 export { resolveCompactionSettings } from "./core/context-compaction.js";
 export type { CompactionSettings, CompactionResult, ContextUsage, ContextStatus } from "./core/types.js";
 export type {
@@ -26,8 +31,10 @@ export type {
   ConversationTurn,
 } from "./history/session-store.js";
 export { buildAgentInstructions } from "./context/build-instructions.js";
-export { discoverMarkdownDocuments, formatDocumentCatalog } from "./context/document-catalog.js";
-export { loadProjectInstructions } from "./context/instruction-loader.js";
+export {
+  loadProjectInstructions,
+  MAX_PROJECT_INSTRUCTION_BYTES,
+} from "./context/instruction-loader.js";
 export { discoverSkills } from "./context/skill-registry.js";
 export { createSkillCatalog, MAX_SKILL_CATALOG_CHARS } from "./context/skill-catalog.js";
 export type { SkillCatalog } from "./context/skill-catalog.js";

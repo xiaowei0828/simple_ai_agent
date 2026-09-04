@@ -77,6 +77,54 @@ describe("context compaction", () => {
     expect(next?.replacementHistory).toEqual(nextHistory.slice(2));
   });
 
+  it("omits archived reasoning from the structured summary input without changing retained history", async () => {
+    const archivedReasoning: ModelInputItem = {
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "archived reasoning must not be summarized" }],
+      encrypted_content: "archived opaque state",
+    };
+    const retainedReasoning: ModelInputItem = {
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "retained reasoning stays in replay history" }],
+      encrypted_content: "retained opaque state",
+    };
+    const reasoningHistory: ModelInputItem[] = [
+      { role: "user", content: "old task" },
+      archivedReasoning,
+      { role: "assistant", content: "old progress ".repeat(300) },
+      { role: "user", content: "recent task" },
+      retainedReasoning,
+      { role: "assistant", content: "recent progress ".repeat(100) },
+    ];
+    let request: ModelRequest | undefined;
+    const result = await compactContext({
+      model: {
+        async respond(value) {
+          request = value;
+          return { id: "summary-id", status: "completed", outputText: "Updated summary.", toolCalls: [] };
+        },
+      },
+      modelName: "test",
+      history: reasoningHistory,
+      settings,
+      instructions: "agent instructions",
+      tools: [],
+      tokensBefore: 2_000,
+    });
+
+    const input = request?.input;
+    expect(typeof input).toBe("string");
+    const match = String(input).match(/<quoted_conversation>\n([\s\S]*?)\n<\/quoted_conversation>/u);
+    expect(match?.[1]).toBeDefined();
+    const quoted = JSON.parse(match![1]!) as { conversation: ModelInputItem[] };
+    expect(quoted.conversation).toEqual([
+      { role: "user", content: "old task" },
+      { role: "assistant", content: "old progress ".repeat(300) },
+    ]);
+    expect(result?.replacementHistory).toEqual(reasoningHistory.slice(3));
+    expect(result?.replacementHistory[1]).toBe(retainedReasoning);
+  });
+
   it.each([
     { outputText: "", toolCalls: [] },
     { outputText: "partial", toolCalls: [], status: "incomplete" },

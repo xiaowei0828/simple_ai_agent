@@ -1,4 +1,8 @@
-import type { AgentRunOptions } from "../core/agent-runner.js";
+import {
+  AgentResponseError,
+  type AgentContinuation,
+  type AgentRunOptions,
+} from "../core/agent-runner.js";
 import type { AgentRunResult, CompactionResult, ReasoningEffort } from "../core/types.js";
 import {
   createConversationTitle,
@@ -49,6 +53,7 @@ const HELP = `Commands:
 export async function runInteractiveSession(options: InteractiveSessionOptions): Promise<void> {
   // Resume always replays local context; only responses from this run can seed continuation.
   let previousResponseId: string | undefined;
+  let continuation: AgentContinuation | undefined;
   let currentModel = options.initialModel;
   let currentConversation: Conversation | undefined;
 
@@ -106,6 +111,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       case "/new":
         currentConversation = undefined;
         previousResponseId = undefined;
+        continuation = undefined;
         options.io.writeStatus("Started a new conversation.");
         continue;
       case "/history":
@@ -132,6 +138,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           }
           currentConversation = await options.historyStore.load(selected.id);
           previousResponseId = undefined;
+          continuation = undefined;
           currentModel = currentConversation.model;
           currentReasoningEffort = restoreReasoningEffort();
           availableModels = uniqueModels(currentModel, availableModels);
@@ -171,6 +178,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           options.io.writeStatus("Compaction is unavailable in this session.");
           continue;
         }
+        continuation = undefined;
         try {
           await saveReasoningEffort();
           options.historyStore.beginCompaction(currentConversation.id);
@@ -244,6 +252,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         currentConversation = undefined;
         currentReasoningEffort = restoreReasoningEffort();
         previousResponseId = undefined;
+        continuation = undefined;
         options.io.writeStatus(`Switched to model: ${selectedModel}. Started a new conversation.`);
         continue;
       }
@@ -279,7 +288,8 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       await saveReasoningEffort();
       await options.historyStore.beginTurn(currentConversation.id, task);
       const result = await options.agent.run(task, {
-        previousResponseId,
+        previousResponseId: continuation?.previousResponseId ?? previousResponseId,
+        ...(continuation ? { pendingInput: continuation.pendingInput } : {}),
         ...(history?.length ? { history } : {}),
         ...(currentConversation.summary ? { summary: currentConversation.summary } : {}),
         ...(currentConversation.contextUsage ? { contextUsage: currentConversation.contextUsage } : {}),
@@ -288,6 +298,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       });
 
       previousResponseId = result.responseId;
+      continuation = undefined;
       options.io.writeAssistant(result.output);
 
       const turn = {
@@ -302,11 +313,12 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         options.io.writeStatus(`Unable to save conversation history: ${errorMessage(error)}`);
       }
     } catch (error) {
+      previousResponseId = undefined;
+      continuation = error instanceof AgentResponseError ? error.continuation : undefined;
       if (currentConversation) {
         try {
           await options.historyStore.failTurn(currentConversation.id, errorMessage(error));
           currentConversation = await options.historyStore.load(currentConversation.id);
-          previousResponseId = undefined;
         } catch (saveError) {
           options.io.writeStatus(`Unable to save interrupted conversation: ${errorMessage(saveError)}`);
         }

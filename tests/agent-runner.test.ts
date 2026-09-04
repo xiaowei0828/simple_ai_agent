@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { AgentLimitError, AgentRunner } from "../src/core/agent-runner.js";
+import { AgentLimitError, AgentResponseError, AgentRunner } from "../src/core/agent-runner.js";
 import { contextTokens, responseInputItems } from "../src/core/context-compaction.js";
 import type {
   AgentEvent,
@@ -256,6 +256,125 @@ describe("AgentRunner", () => {
     expect(model.requests[0]).toMatchObject({ previousResponseId: "response-previous", input: "Follow up." });
   });
 
+  it("returns a retry checkpoint when the first model request fails after a known response", async () => {
+    const root = await fixture();
+    const requests: ModelRequest[] = [];
+    const failure = new TypeError("connection terminated");
+    const runner = new AgentRunner({
+      model: { async respond(request) { requests.push(request); throw failure; } },
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+    });
+
+    const thrown = await runner.run(" Follow up. ", {
+      previousResponseId: "response-previous",
+    }).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(AgentResponseError);
+    expect(thrown).toMatchObject({
+      message: "connection terminated",
+      continuation: {
+        previousResponseId: "response-previous",
+        pendingInput: "Follow up.",
+      },
+    });
+    expect((thrown as AgentResponseError).cause).toBe(failure);
+    expect(requests[0]?.input).toBe("Follow up.");
+  });
+
+  it("checkpoints saved tool outputs and resumes without executing the tool again", async () => {
+    const root = await fixture();
+    const requests: ModelRequest[] = [];
+    const savedOutputs: ToolCallOutput[] = [];
+    let modelCall = 0;
+    let executions = 0;
+    const runner = new AgentRunner({
+      model: {
+        async respond(request) {
+          requests.push(request);
+          modelCall += 1;
+          if (modelCall === 1) {
+            return {
+              id: "response-tools",
+              outputText: "",
+              toolCalls: [{ callId: "call-1", name: "save_result", arguments: "{}" }],
+            };
+          }
+          if (modelCall === 2) throw new TypeError("connection terminated");
+          return { id: "response-done", outputText: "Done.", toolCalls: [] };
+        },
+      },
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: new ToolRegistry([{
+        definition: {
+          type: "function", name: "save_result", description: "fixture",
+          parameters: {}, strict: false,
+        },
+        risk: "write",
+        parse(input: unknown) { return input; },
+        async execute() { executions += 1; return { saved: true }; },
+      }]),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      onEvent(event) {
+        if (event.type === "tool_output") savedOutputs.push(event.output);
+      },
+    });
+
+    const failure = await runner.run("Save once.").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AgentResponseError);
+    const continuation = (failure as AgentResponseError).continuation;
+    expect(continuation).toEqual({
+      previousResponseId: "response-tools",
+      pendingInput: savedOutputs,
+    });
+
+    const result = await runner.run("Continue with the saved result.", {
+      ...continuation,
+      history: [
+        { role: "user", content: "Large local history stays local." },
+        { role: "assistant", content: "Earlier answer." },
+      ],
+    });
+
+    expect(result.output).toBe("Done.");
+    expect(executions).toBe(1);
+    expect(requests[2]?.previousResponseId).toBe("response-tools");
+    expect(requests[2]?.input).toEqual([
+      ...savedOutputs,
+      { role: "user", content: "Continue with the saved result." },
+    ]);
+  });
+
+  it("does not issue another checkpoint when a continuation's first request fails", async () => {
+    const root = await fixture();
+    const requests: ModelRequest[] = [];
+    const failure = new TypeError("still offline");
+    const runner = new AgentRunner({
+      model: { async respond(request) { requests.push(request); throw failure; } },
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+    });
+
+    const thrown = await runner.run("New request.", {
+      previousResponseId: "response-previous",
+      pendingInput: "Interrupted request.",
+    }).catch((error: unknown) => error);
+
+    expect(thrown).toBe(failure);
+    expect(requests[0]?.input).toEqual([
+      { role: "user", content: "Interrupted request." },
+      { role: "user", content: "New request." },
+    ]);
+  });
+
   it("executes a tool call and sends its output to the next model turn", async () => {
     const root = await fixture();
     const model = new ScriptedModel([
@@ -380,6 +499,7 @@ describe("AgentRunner", () => {
       toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
       maxToolOutputChars,
+      maxToolOutputCharsPerStep: maxToolOutputChars * 2,
     });
 
     await runner.run("Produce large outputs.");
@@ -414,7 +534,108 @@ describe("AgentRunner", () => {
     expect(failure.error).toEqual(expect.stringMatching(/-END$/));
   });
 
-  it("preserves command status when the runner trims long command output", async () => {
+  it("shares one output budget across every tool call in a model step", async () => {
+    const tools = new ToolRegistry([{
+      definition: {
+        type: "function",
+        name: "large_output",
+        description: "Return or throw a large test payload.",
+        parameters: { type: "object" },
+        strict: true,
+      },
+      risk: "execute",
+      parse(input: unknown) {
+        return input as { fail: boolean; label: string };
+      },
+      async execute(input: { fail: boolean; label: string }) {
+        const content = `${input.label}-BEGIN-${"x".repeat(2_000)}-${input.label}-END`;
+        if (input.fail) throw new Error(content);
+        return { content };
+      },
+    }]);
+    const calls = [
+      { callId: "first", name: "large_output", arguments: JSON.stringify({ fail: false, label: "A" }) },
+      { callId: "second", name: "large_output", arguments: JSON.stringify({ fail: false, label: "B" }) },
+      { callId: "third", name: "large_output", arguments: JSON.stringify({ fail: true, label: "C" }) },
+    ];
+    const model = new ScriptedModel([
+      { id: "response-1", outputText: "", toolCalls: calls },
+      { id: "response-2", outputText: "Done.", toolCalls: [] },
+    ]);
+    const maxToolOutputCharsPerStep = 600;
+    const runner = new AgentRunner({
+      model, modelName: "test-model", instructions: "test instructions", tools,
+      toolContext: { workspaceRoot: process.cwd() },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      maxToolOutputChars: 400,
+      maxToolOutputCharsPerStep,
+    });
+
+    await runner.run("Produce a batch of large outputs.");
+
+    const outputs = functionCallOutputs(model.requests[1]);
+    expect(outputs.map((output) => output.call_id)).toEqual(calls.map((call) => call.callId));
+    expect(outputs.reduce((total, output) => total + output.output.length, 0))
+      .toBeLessThanOrEqual(maxToolOutputCharsPerStep);
+    expect(outputs.map((output) => {
+      const parsed = JSON.parse(output.output) as { ok: boolean; truncated: boolean };
+      return { ok: parsed.ok, truncated: parsed.truncated };
+    })).toEqual([
+      { ok: true, truncated: true },
+      { ok: true, truncated: true },
+      { ok: false, truncated: true },
+    ]);
+  });
+
+  it("preserves every call pairing when minimal status envelopes exceed the step budget", async () => {
+    let executions = 0;
+    const tools = new ToolRegistry([{
+      definition: {
+        type: "function",
+        name: "large_output",
+        description: "Return a large test payload.",
+        parameters: { type: "object" },
+        strict: true,
+      },
+      risk: "execute",
+      parse(input: unknown) {
+        return input;
+      },
+      async execute() {
+        executions += 1;
+        return "x".repeat(2_000);
+      },
+    }]);
+    const calls = Array.from({ length: 5 }, (_, index) => ({
+      callId: `call-${index}`,
+      name: "large_output",
+      arguments: "{}",
+    }));
+    const model = new ScriptedModel([
+      { id: "response-1", outputText: "", toolCalls: calls },
+      { id: "response-2", outputText: "Done.", toolCalls: [] },
+    ]);
+    const runner = new AgentRunner({
+      model, modelName: "test-model", instructions: "test instructions", tools,
+      toolContext: { workspaceRoot: process.cwd() },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      maxToolOutputCharsPerStep: 128,
+    });
+
+    await runner.run("Produce more calls than the minimal step budget can hold.");
+
+    const outputs = functionCallOutputs(model.requests[1]);
+    const minimalEnvelopeChars = JSON.stringify({ ok: false, truncated: true }).length;
+    expect(executions).toBe(calls.length);
+    expect(outputs.map((output) => output.call_id)).toEqual(calls.map((call) => call.callId));
+    expect(outputs.reduce((total, output) => total + output.output.length, 0))
+      .toBeLessThanOrEqual(calls.length * minimalEnvelopeChars);
+    for (const output of outputs) {
+      expect(JSON.parse(output.output)).toEqual({ ok: true, truncated: true });
+    }
+  });
+
+  it("bounds command output once while preserving process status", async () => {
     const root = await fixture();
     await writeFile(
       path.join(root, "many-lines.txt"),
@@ -447,14 +668,17 @@ describe("AgentRunner", () => {
 
     const [toolOutput] = functionCallOutputs(model.requests[1]);
     const parsed = JSON.parse(toolOutput?.output ?? "") as {
+      ok: boolean;
       truncated: boolean;
-      result: { output: string; exitCode: number; timedOut: boolean };
+      result: { output: string; exitCode: number; timedOut: boolean; truncated: boolean };
     };
     expect(toolOutput?.output.length).toBeLessThanOrEqual(600);
+    expect(parsed.ok).toBe(true);
     expect(parsed.truncated).toBe(true);
     expect(parsed.result.output).toContain("…[truncated]…");
     expect(parsed.result.exitCode).toBe(0);
     expect(parsed.result.timedOut).toBe(false);
+    expect(parsed.result.truncated).toBe(false);
   });
 
   it("rejects a tool output budget too small for a structured truncation envelope", async () => {
@@ -469,6 +693,15 @@ describe("AgentRunner", () => {
       approvalPolicy: new AllowAllApprovalPolicy(),
       maxToolOutputChars: 127,
     })).toThrow("at least 128");
+    expect(() => new AgentRunner({
+      model: new ScriptedModel([]),
+      modelName: "test-model",
+      instructions: "test instructions",
+      tools: createDefaultToolRegistry(),
+      toolContext: { workspaceRoot: root },
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      maxToolOutputCharsPerStep: 127,
+    })).toThrow("maxToolOutputCharsPerStep must be an integer of at least 128");
   });
 
   it("applies a patch only after approval and returns the change summary to the model", async () => {

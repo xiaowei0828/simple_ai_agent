@@ -2,15 +2,16 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildAgentInstructions } from "../src/context/build-instructions.js";
-import { loadProjectInstructions } from "../src/context/instruction-loader.js";
-import { discoverMarkdownDocuments } from "../src/context/document-catalog.js";
+import {
+  loadProjectInstructions,
+  MAX_PROJECT_INSTRUCTION_BYTES,
+} from "../src/context/instruction-loader.js";
 import { discoverSkills } from "../src/context/skill-registry.js";
 import {
   assertSafeRelativePath,
   resolveExistingWorkspacePath,
   createWorkspacePathResolver,
 } from "../src/policy/path-policy.js";
-import { walkFiles } from "../src/context/walk-files.js";
 import { createTempDirectoryFixture } from "./test-utils.js";
 
 const createTempDirectory = createTempDirectoryFixture();
@@ -102,46 +103,11 @@ describe("workspace path policy", () => {
   });
 });
 
-describe("workspace file discovery", () => {
-  it("stops streaming a large directory at the explicit entry budget", async () => {
-    const root = await createTempDirectory("simple-code-agent-walk-budget-");
-    await Promise.all(Array.from({ length: 10 }, (_, index) => (
-      writeFile(path.join(root, `file-${index}.txt`), "value", "utf8")
-    )));
-
-    const result = await walkFiles(root, {
-      maxFiles: 10,
-      maxDirectories: 10,
-      maxEntries: 3,
-      includeFile: () => true,
-    });
-
-    expect(result).toHaveLength(3);
-  });
-
-  it("applies a discovery filter before consuming the file budget", async () => {
-    const root = await createTempDirectory("simple-code-agent-walk-filter-");
-    await writeFile(path.join(root, "a.log"), "ignore", "utf8");
-    await writeFile(path.join(root, "b.log"), "ignore", "utf8");
-    await writeFile(path.join(root, "target.ts"), "include", "utf8");
-
-    const result = await walkFiles(root, {
-      maxFiles: 1,
-      maxDirectories: 1,
-      maxEntries: 10,
-      includeFile: (file) => file.endsWith(".ts"),
-    });
-
-    expect(result.map((file) => path.basename(file))).toEqual(["target.ts"]);
-  });
-});
-
 describe("context discovery", () => {
   it("includes the actual command execution semantics in model instructions", () => {
     const instructions = buildAgentInstructions(
       { files: [], content: "project rule" },
       "",
-      [],
       {
         platform: "darwin",
         architecture: "arm64",
@@ -152,48 +118,55 @@ describe("context discovery", () => {
     expect(instructions).toContain("Runtime: darwin/arm64");
     expect(instructions).toContain("macOS/BSD command conventions");
     expect(instructions).toContain("Shell: fish (/bin/fish), non-interactive");
-    expect(instructions).toContain("including chaining, pipelines, redirects");
-    expect(instructions).toContain("run_command requires host confirmation");
-    expect(instructions).toContain("Use apply_patch for file creation, edits, moves, and deletion");
-    expect(instructions).toContain("Load a relevant skill");
+    expect(instructions).toContain("Respect tool approval requirements");
+    expect(instructions).toContain("use apply_patch for file changes");
+    expect(instructions).toContain("read its SKILL.md before acting");
+    expect(instructions.length).toBeLessThan(1_500);
   });
 
-  it("omits empty project, document, and skill sections", () => {
+  it("omits empty project and skill sections", () => {
     const instructions = buildAgentInstructions(
       { files: [], content: "" },
       "",
-      [],
       { platform: "linux", architecture: "x64" },
     );
 
     expect(instructions).not.toContain("# Project instructions");
-    expect(instructions).not.toContain("# Markdown documentation catalog");
     expect(instructions).not.toContain("# Available skills");
   });
 
-  it("loads hierarchical AGENTS files and prefers an override", async () => {
+  it("loads only the root AGENTS.md", async () => {
     const root = await createTempDirectory("simple-code-agent-instructions-");
     const child = path.join(root, "packages", "app");
     await mkdir(child, { recursive: true });
     await writeFile(path.join(root, "AGENTS.md"), "root rule", "utf8");
-    await writeFile(path.join(child, "AGENTS.md"), "ignored rule", "utf8");
-    await writeFile(path.join(child, "AGENTS.override.md"), "child override", "utf8");
+    await writeFile(path.join(child, "AGENTS.md"), "nested rule", "utf8");
+    await writeFile(path.join(child, "AGENTS.override.md"), "ignored override", "utf8");
 
-    const loaded = await loadProjectInstructions(root, child);
+    const loaded = await loadProjectInstructions(root);
 
     expect(loaded.content).toContain("root rule");
-    expect(loaded.content).toContain("child override");
-    expect(loaded.content).not.toContain("ignored rule");
-    expect(loaded.files).toHaveLength(2);
+    expect(loaded.content).not.toContain("nested rule");
+    expect(loaded.content).not.toContain("ignored override");
+    expect(loaded.files).toEqual([path.join(root, "AGENTS.md")]);
+    expect(loaded.warning).toBeUndefined();
   });
 
-  it("accepts a workspace child whose name begins with two dots", async () => {
-    const root = await createTempDirectory("simple-code-agent-dot-directory-");
-    const child = path.join(root, "..notes");
-    await mkdir(child);
-    await writeFile(path.join(child, "AGENTS.md"), "child rule", "utf8");
-    expect((await loadProjectInstructions(root, child)).content).toContain("child rule");
-    await expect(loadProjectInstructions(root, path.dirname(root))).rejects.toThrow("inside workspaceRoot");
+  it("limits oversized root instructions without splitting UTF-8 characters", async () => {
+    const root = await createTempDirectory("simple-code-agent-large-instructions-");
+    await writeFile(
+      path.join(root, "AGENTS.md"),
+      "你".repeat(Math.ceil(MAX_PROJECT_INSTRUCTION_BYTES / 3) + 10),
+      "utf8",
+    );
+
+    const loaded = await loadProjectInstructions(root);
+
+    expect(Buffer.byteLength(loaded.content, "utf8")).toBeLessThanOrEqual(
+      MAX_PROJECT_INSTRUCTION_BYTES,
+    );
+    expect(loaded.content).not.toContain("\uFFFD");
+    expect(loaded.warning).toContain("was truncated");
   });
 
   it("discovers skill metadata without loading unrelated assets", async () => {
@@ -212,18 +185,7 @@ routing: Targeted code review.
     expect(skills).toMatchObject([{
       name: "review",
       description: "Review code carefully.",
-      routing: "Targeted code review.",
     }]);
   });
 
-  it("indexes Markdown paths and headings without treating AGENTS.md as a regular document", async () => {
-    const root = await createTempDirectory("simple-code-agent-docs-");
-    await mkdir(path.join(root, "docs"));
-    await writeFile(path.join(root, "AGENTS.md"), "agent rules", "utf8");
-    await writeFile(path.join(root, "docs", "architecture.md"), "# Runtime architecture\n\nDetails", "utf8");
-
-    const documents = await discoverMarkdownDocuments(root);
-
-    expect(documents).toEqual([{ path: "docs/architecture.md", title: "Runtime architecture" }]);
-  });
 });

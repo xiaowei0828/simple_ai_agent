@@ -85,7 +85,7 @@ npm run dev -- --help
 
 ## 项目指令与 Skill
 
-Agent 会自动加载工作区中的 `AGENTS.md` 和 `AGENTS.override.md`。
+Agent 只加载工作区根目录的 `AGENTS.md`，内容最多为 32 KiB。
 
 Skill 默认从以下位置发现：
 

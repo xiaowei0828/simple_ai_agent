@@ -17,10 +17,9 @@ import {
 import { AgentRunner } from "../core/agent-runner.js";
 import type { ApprovalRequest } from "../core/types.js";
 import { buildAgentInstructions } from "../context/build-instructions.js";
-import { discoverMarkdownDocuments } from "../context/document-catalog.js";
 import { loadProjectInstructions } from "../context/instruction-loader.js";
 import { discoverSkills } from "../context/skill-registry.js";
-import { createSkillCatalog, type SkillCatalog } from "../context/skill-catalog.js";
+import { createSkillCatalog } from "../context/skill-catalog.js";
 import { JsonlConversationStore } from "../history/session-store.js";
 import { OpenAIModel } from "../model/openai-model.js";
 import { ConfiguredModel } from "../model/configured-model.js";
@@ -54,14 +53,16 @@ async function main(): Promise<void> {
     ...options.skillRoots,
   ].map((root) => path.resolve(root));
 
-  const [projectInstructions, skills, documents] = await Promise.all([
+  const [projectInstructions, skills] = await Promise.all([
     loadProjectInstructions(workspaceRoot),
     discoverSkills([...new Set(skillRoots)]),
-    discoverMarkdownDocuments(workspaceRoot),
   ]);
   process.stderr.write(
-    `agent: loaded ${projectInstructions.files.length} instruction file(s), indexed ${documents.length} doc(s), discovered ${skills.length} skill(s)\n`,
+    `agent: discovered ${projectInstructions.files.length} instruction file(s) and ${skills.length} skill(s)\n`,
   );
+  if (projectInstructions.warning) {
+    process.stderr.write(`agent: ${projectInstructions.warning}\n`);
+  }
 
   const traceDirectory = path.join(workspaceRoot, ".agent-runs");
   const historyStore = new JsonlConversationStore(traceDirectory, {
@@ -93,9 +94,9 @@ async function main(): Promise<void> {
     interactiveApprovalPolicy,
   );
 
-  let skillCatalog: SkillCatalog | undefined;
+  const skillCatalog = createSkillCatalog(skills);
+  if (skillCatalog.warning) process.stderr.write(`agent: ${skillCatalog.warning}\n`);
   try {
-    skillCatalog = await createSkillCatalog(skills);
     const runner = new AgentRunner({
       model: new ConfiguredModel(appConfig, (connection) => new OpenAIModel({
         apiKey: connection.apiKey,
@@ -103,7 +104,7 @@ async function main(): Promise<void> {
         traceSink: options.debug ? historyStore : undefined,
       })),
       modelName: initialModel,
-      instructions: buildAgentInstructions(projectInstructions, skillCatalog.content, documents),
+      instructions: buildAgentInstructions(projectInstructions, skillCatalog.content),
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot },
       approvalPolicy,
@@ -151,7 +152,6 @@ async function main(): Promise<void> {
     });
   } finally {
     readline.close();
-    await skillCatalog?.dispose();
   }
 }
 

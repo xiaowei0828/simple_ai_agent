@@ -116,13 +116,15 @@ describe("run_command", () => {
       timeoutMs: 10_000,
     });
 
-    await expect(tool.execute(input, { workspaceRoot: process.cwd() })).resolves.toMatchObject({
-      command: "node --version",
-      cwd: ".",
+    const result = await tool.execute(input, { workspaceRoot: process.cwd() }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
       exitCode: 0,
       timedOut: false,
       truncated: false,
     });
+    expect(result).not.toHaveProperty("command");
+    expect(result).not.toHaveProperty("cwd");
   });
 
   it("lets the active shell evaluate pipelines and chaining", async () => {

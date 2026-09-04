@@ -41,7 +41,7 @@ export class OpenAIModel implements ModelAdapter {
     this.#client = options.client ?? new OpenAI({
       apiKey: options.apiKey,
       baseURL: options.baseURL,
-      maxRetries: 0,
+      maxRetries: 2,
     });
     this.#parallelToolCalls = options.parallelToolCalls ?? true;
     this.#traceSink = options.traceSink;

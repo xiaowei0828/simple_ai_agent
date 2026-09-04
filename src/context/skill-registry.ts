@@ -6,7 +6,6 @@ import { readUtf8Prefix } from "./read-prefix.js";
 export interface SkillMetadata {
   name: string;
   description: string;
-  routing?: string;
   filePath: string;
 }
 
@@ -26,7 +25,7 @@ function unquote(value: string): string {
 function parseMetadata(
   content: string,
   fallbackName: string,
-): Pick<SkillMetadata, "name" | "description" | "routing"> {
+): Pick<SkillMetadata, "name" | "description"> {
   const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!frontmatter?.[1]) {
     return { name: fallbackName, description: "Local workflow instructions." };
@@ -40,7 +39,6 @@ function parseMetadata(
   return {
     name: values.get("name") ?? fallbackName,
     description: values.get("description") ?? "Local workflow instructions.",
-    ...(values.has("routing") ? { routing: values.get("routing") } : {}),
   };
 }
 

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runInteractiveSession, type InteractiveAgent, type InteractiveSessionOptions } from "../src/cli/interactive-session.js";
-import type { AgentRunOptions } from "../src/core/agent-runner.js";
+import { AgentResponseError, type AgentRunOptions } from "../src/core/agent-runner.js";
 import type { AgentRunResult } from "../src/core/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { JsonlConversationStore } from "../src/history/session-store.js";
@@ -314,6 +314,42 @@ describe("runInteractiveSession", () => {
     expect(persisted.status).toBe("failed");
     expect(persisted.pendingTask).toBe("failing follow up");
     expect(persisted.context.at(-1)).toEqual({ role: "user", content: "failing follow up" });
+  });
+
+  it("reuses one failure checkpoint, then falls back to local history", async () => {
+    const calls: Array<{ task: string; options?: AgentRunOptions }> = [];
+    const inputs = ["first", "failing", "retry", "fallback", "/exit"];
+    const agent: InteractiveAgent = {
+      async run(task, runOptions) {
+        calls.push({ task, options: runOptions });
+        if (calls.length === 1) {
+          return { output: "answer-1", steps: 1, responseId: "response-1" };
+        }
+        if (calls.length === 2) {
+          throw new AgentResponseError(new Error("offline"), {
+            previousResponseId: "response-1",
+            pendingInput: "failing",
+          });
+        }
+        if (calls.length === 3) throw new Error("still offline");
+        return { output: "answer-4", steps: 1, responseId: "response-4" };
+      },
+    };
+
+    await runSession({ agent, io: scriptedIO(inputs) });
+
+    expect(calls[2]?.options).toMatchObject({
+      previousResponseId: "response-1",
+      pendingInput: "failing",
+    });
+    expect(calls[3]?.options).not.toHaveProperty("pendingInput");
+    expect(calls[3]?.options?.previousResponseId).toBeUndefined();
+    expect(calls[3]?.options?.history).toEqual([
+      { role: "user", content: "first" },
+      { role: "assistant", content: "answer-1" },
+      { role: "user", content: "failing" },
+      { role: "user", content: "retry" },
+    ]);
   });
 
   it("lists and renames the current saved conversation", async () => {

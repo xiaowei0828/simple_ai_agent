@@ -50,11 +50,14 @@ function messageResponse(id: string, text = "hello") {
   };
 }
 
-function sse(event: { type: string }): string {
+function sse(event: { type: string; [key: string]: unknown }): string {
   return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
 
 describe("OpenAIModel", () => {
   it("requires explicit credentials and endpoint even when SDK environment variables are set", () => {
@@ -66,6 +69,61 @@ describe("OpenAIModel", () => {
       .toThrow("explicit apiKey and baseURL");
     expect(() => new OpenAIModel({ apiKey: "explicit-key", baseURL: "https://explicit.test/v1" }))
       .not.toThrow();
+  });
+
+  it("retries a transient error before a streaming response starts", async () => {
+    const emitted: ModelStreamEvent[] = [];
+    const requests: Array<{ body: string; method: string }> = [];
+    const finalResponse = messageResponse("resp-retried", "recovered");
+    const stream = [
+      sse({
+        type: "response.output_text.delta",
+        item_id: "msg-retried",
+        output_index: 0,
+        content_index: 0,
+        delta: "recovered",
+        logprobs: [],
+        sequence_number: 1,
+      }),
+      sse({ type: "response.completed", response: finalResponse, sequence_number: 2 }),
+      "data: [DONE]\n\n",
+    ].join("");
+    vi.stubGlobal("fetch", vi.fn(async (_input, init) => {
+      requests.push({ body: String(init?.body), method: String(init?.method) });
+      if (requests.length === 1) {
+        return new Response(JSON.stringify({ error: { message: "overloaded" } }), {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "retry-after-ms": "1",
+          },
+        });
+      }
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }));
+    const model = new OpenAIModel({
+      apiKey: "test-key",
+      baseURL: "https://example.test/v1",
+    });
+
+    const result = await model.respond(modelRequest({
+      previousResponseId: "resp-previous",
+      stream: true,
+      async onStreamEvent(event) { emitted.push(event); },
+    }));
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.method)).toEqual(["POST", "POST"]);
+    expect(requests[0]!.body).toBe(requests[1]!.body);
+    expect(JSON.parse(requests[0]!.body)).toMatchObject({
+      previous_response_id: "resp-previous",
+      stream: true,
+    });
+    expect(emitted).toEqual([{ type: "output_text_delta", delta: "recovered" }]);
+    expect(result).toMatchObject({ id: "resp-retried", outputText: "recovered" });
   });
 
   it("captures the SDK request body and full parsed response without credentials", async () => {

@@ -22,6 +22,10 @@ import {
 export const DEFAULT_MAX_STEPS = 300;
 
 const MIN_TOOL_OUTPUT_CHARS = 128;
+const MIN_TRUNCATED_TOOL_OUTPUT_CHARS = JSON.stringify({
+  ok: false,
+  truncated: true,
+}).length;
 const TRUNCATION_MARKER = "…[truncated]…";
 const MIN_STRUCTURED_STRING_CHARS = 64;
 const TRUNCATION_SEARCH_STEPS = 1_000;
@@ -99,7 +103,14 @@ function serializeTruncatedToolOutput(
   }
 
   if (bestOutput) return bestOutput;
-  throw new Error("maxToolOutputChars is too small for truncation metadata.");
+  for (const truncatedValue of [
+    { ok: value.ok, truncated: true, originalOutputChars },
+    { ok: value.ok, truncated: true },
+  ]) {
+    const output = JSON.stringify(truncatedValue);
+    if (output.length <= maxChars) return output;
+  }
+  throw new Error("The tool output budget is too small to preserve status and truncation metadata.");
 }
 
 function measureJson(value: JsonValue, limits: JsonLimits): void {
@@ -231,6 +242,7 @@ export interface AgentRunnerOptions {
   approvalPolicy: ApprovalPolicy;
   maxSteps?: number;
   maxToolOutputChars?: number;
+  maxToolOutputCharsPerStep?: number;
   reasoningEffort?: ReasoningEffort;
   stream?: boolean;
   onEvent?: AgentEventHandler;
@@ -240,11 +252,29 @@ export interface AgentRunnerOptions {
 export interface AgentRunOptions {
   reasoningEffort?: ReasoningEffort;
   previousResponseId?: string;
+  /** Input that failed immediately after previousResponseId and can be retried once. */
+  pendingInput?: string | ModelInputItem[];
   model?: string;
   /** Local mirror of active history. With a live response ID, only the new input is sent. */
   history?: ModelInputItem[];
   summary?: string;
   contextUsage?: ContextUsage;
+}
+
+export interface AgentContinuation {
+  previousResponseId: string;
+  pendingInput: string | ModelInputItem[];
+}
+
+/** A failed model request carrying one provider-independent retry checkpoint. */
+export class AgentResponseError extends Error {
+  readonly continuation: AgentContinuation;
+
+  constructor(error: unknown, continuation: AgentContinuation) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "AgentResponseError";
+    this.continuation = continuation;
+  }
 }
 
 export class AgentLimitError extends Error {
@@ -257,20 +287,31 @@ export class AgentLimitError extends Error {
 export class AgentRunner {
   readonly #options: AgentRunnerOptions & Required<Pick<
     AgentRunnerOptions,
-    "maxSteps" | "maxToolOutputChars" | "stream"
+    "maxSteps" | "maxToolOutputChars" | "maxToolOutputCharsPerStep" | "stream"
   >>;
 
   constructor(options: AgentRunnerOptions) {
     const maxToolOutputChars = options.maxToolOutputChars ?? 20_000;
+    const maxToolOutputCharsPerStep = options.maxToolOutputCharsPerStep
+      ?? maxToolOutputChars;
     if (!Number.isInteger(maxToolOutputChars) || maxToolOutputChars < MIN_TOOL_OUTPUT_CHARS) {
       throw new RangeError(
         `maxToolOutputChars must be an integer of at least ${MIN_TOOL_OUTPUT_CHARS}.`,
+      );
+    }
+    if (
+      !Number.isInteger(maxToolOutputCharsPerStep)
+      || maxToolOutputCharsPerStep < MIN_TOOL_OUTPUT_CHARS
+    ) {
+      throw new RangeError(
+        `maxToolOutputCharsPerStep must be an integer of at least ${MIN_TOOL_OUTPUT_CHARS}.`,
       );
     }
     this.#options = {
       ...options,
       maxSteps: options.maxSteps ?? DEFAULT_MAX_STEPS,
       maxToolOutputChars,
+      maxToolOutputCharsPerStep,
       stream: options.stream ?? true,
     };
   }
@@ -280,12 +321,26 @@ export class AgentRunner {
     if (!taskText) {
       throw new Error("Task cannot be empty.");
     }
+    if (runOptions.pendingInput !== undefined && !runOptions.previousResponseId) {
+      throw new Error("pendingInput requires previousResponseId.");
+    }
     await this.#emit({ type: "run_started", task: taskText });
     let history: ModelInputItem[] = [...runOptions.history ?? [], { role: "user", content: taskText }];
     let summary = runOptions.summary;
     let usage = runOptions.contextUsage;
-    let input: string | ModelInputItem[] = !runOptions.previousResponseId && (runOptions.history?.length || summary)
-      ? contextInput(history, summary) : taskText;
+    const pendingInput = runOptions.pendingInput;
+    const isContinuationAttempt = pendingInput !== undefined;
+    let input: string | ModelInputItem[];
+    if (runOptions.previousResponseId && pendingInput !== undefined) {
+      const pendingItems = typeof pendingInput === "string"
+        ? [{ role: "user" as const, content: pendingInput }]
+        : pendingInput;
+      input = [...pendingItems, { role: "user", content: taskText }];
+    } else if (!runOptions.previousResponseId && (runOptions.history?.length || summary)) {
+      input = contextInput(history, summary);
+    } else {
+      input = taskText;
+    }
     let previousResponseId = runOptions.previousResponseId;
     const modelName = runOptions.model?.trim() || this.#options.modelName;
     const settings = this.#settings(modelName);
@@ -326,6 +381,13 @@ export class AgentRunner {
         });
       } catch (error) {
         await this.#emit({ type: "model_response_failed", step });
+        const continuation = previousResponseId && !(isContinuationAttempt && step === 1)
+          ? {
+              previousResponseId,
+              pendingInput: typeof input === "string" ? input : [...input],
+            }
+          : undefined;
+        if (continuation) throw new AgentResponseError(error, continuation);
         throw error;
       }
       previousResponseId = response.id;
@@ -392,14 +454,28 @@ export class AgentRunner {
 
   async #executeTools(calls: ModelToolCall[], step: number): Promise<ToolCallOutput[]> {
     const outputs: ToolCallOutput[] = [];
-    for (const call of calls) {
+    // A function_call_output is required for every call. If the configured
+    // budget cannot fit those minimal envelopes, preserve protocol pairing
+    // and omit optional result details instead of failing the whole step.
+    let remainingOutputChars = Math.max(
+      this.#options.maxToolOutputCharsPerStep,
+      calls.length * MIN_TRUNCATED_TOOL_OUTPUT_CHARS,
+    );
+    for (const [index, call] of calls.entries()) {
+      const remainingCalls = calls.length - index;
+      const outputBudget = Math.min(
+        this.#options.maxToolOutputChars,
+        Math.floor(remainingOutputChars / remainingCalls),
+      );
       const tool = this.#options.tools.get(call.name);
       await this.#emit({ type: "tool_requested", step, call, risk: tool?.risk });
       if (!tool) {
-        await this.#recordToolOutput(outputs, step, this.#toolOutput(call.callId, {
+        const output = this.#toolOutput(call.callId, {
           ok: false,
           error: `Unknown tool: ${call.name}`,
-        }));
+        }, outputBudget);
+        await this.#recordToolOutput(outputs, step, output);
+        remainingOutputChars -= output.output.length;
         continue;
       }
 
@@ -411,19 +487,24 @@ export class AgentRunner {
         await this.#emit({ type: "approval_requested", step, request: approvalRequest });
         const approved = await this.#options.approvalPolicy.approve(approvalRequest);
         if (!approved) {
-          output = this.#toolOutput(call.callId, { ok: false, error: "User denied this tool call." });
+          output = this.#toolOutput(
+            call.callId,
+            { ok: false, error: "User denied this tool call." },
+            outputBudget,
+          );
         } else {
           const result = await tool.execute(parsedArguments, this.#options.toolContext);
-          output = this.#toolOutput(call.callId, { ok: true, result });
+          output = this.#toolOutput(call.callId, { ok: true, result }, outputBudget);
           await this.#emit({ type: "tool_completed", step, callId: call.callId, toolName: call.name, result });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await this.#emit({ type: "tool_failed", step, callId: call.callId, toolName: call.name, error: message });
-        output = this.#toolOutput(call.callId, { ok: false, error: message });
+        output = this.#toolOutput(call.callId, { ok: false, error: message }, outputBudget);
       }
       // Persistence failures must stop the run, not turn a completed action into a tool failure.
       await this.#recordToolOutput(outputs, step, output);
+      remainingOutputChars -= output.output.length;
     }
     return outputs;
   }
@@ -433,11 +514,11 @@ export class AgentRunner {
     outputs.push(output);
   }
 
-  #toolOutput(callId: string, value: ToolOutputValue): ToolCallOutput {
+  #toolOutput(callId: string, value: ToolOutputValue, maxChars: number): ToolCallOutput {
     return {
       type: "function_call_output",
       call_id: callId,
-      output: serializeToolOutput(value, this.#options.maxToolOutputChars),
+      output: serializeToolOutput(value, maxChars),
     };
   }
 

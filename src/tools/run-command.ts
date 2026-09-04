@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { z } from "zod";
-import { resolveExistingWorkspacePath, toWorkspaceRelative } from "../policy/path-policy.js";
+import { resolveExistingWorkspacePath } from "../policy/path-policy.js";
 import { resolveRuntimeShell, runProcess } from "./process-runner.js";
 import type { AgentTool } from "./types.js";
 
@@ -47,16 +47,11 @@ export function createRunCommandTool(): AgentTool<z.infer<typeof inputSchema>> {
       const cwd = await resolveExistingWorkspacePath(context.workspaceRoot, input.cwd);
       if (!(await stat(cwd)).isDirectory()) throw new Error("run_command cwd must be a directory.");
 
-      const result = await runProcess({
+      return runProcess({
         command: input.command,
         cwd,
         timeoutMs: input.timeoutMs,
       });
-      return {
-        command: input.command,
-        cwd: toWorkspaceRelative(context.workspaceRoot, cwd),
-        ...result,
-      };
     },
   };
 }
