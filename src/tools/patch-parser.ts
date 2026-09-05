@@ -1,5 +1,5 @@
 import path from "node:path";
-import { assertSafeRelativePath } from "../policy/path-policy.js";
+import { assertPatchPath } from "./patch-paths.js";
 
 export interface PatchChunk {
   anchor?: string;
@@ -17,13 +17,11 @@ export const MAX_PATCH_BYTES = 1_000_000;
 const MAX_FILE_PATCHES = 100;
 
 function parsePath(value: string): string {
-  if (!value || value !== value.trim() || value.endsWith("/") || value.includes("\\") || path.win32.isAbsolute(value)) {
-    throw new Error("Patch paths must be workspace-relative paths using forward slashes.");
+  assertPatchPath(value);
+  const normalized = path.normalize(value).split(path.sep).join("/");
+  if (normalized === "." || normalized === path.parse(normalized).root) {
+    throw new Error("A patch must target a file, not a filesystem root.");
   }
-  assertSafeRelativePath(value);
-  if (value.split("/").includes("..")) throw new Error("Patch path escapes the workspace.");
-  const normalized = path.posix.normalize(value);
-  if (normalized === ".") throw new Error("A patch must target a file, not the workspace root.");
   return normalized;
 }
 

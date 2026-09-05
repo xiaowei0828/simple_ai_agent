@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, truncate, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -47,7 +48,6 @@ export interface ConversationStore {
 }
 interface StoreOptions {
   onWarning?: (message: string) => void;
-  legacyDirectory?: string;
 }
 export interface SessionEntry {
   type: string;
@@ -80,22 +80,46 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
   }
 
   async list(): Promise<ConversationSummary[]> {
-    await this.#importLegacy();
     let files: string[];
     try { files = await readdir(this.#directory); }
     catch (error) { if (hasCode(error, "ENOENT")) return []; throw error; }
-    const conversations: Conversation[] = [];
+    const conversations: ConversationSummary[] = [];
     for (const file of files.filter((name) => name.endsWith(".jsonl"))) {
-      // Timestamp-named legacy debug files remain viewable, but aren't journals.
       const id = file.slice(0, -6);
       if (!z.string().uuid().safeParse(id).success) continue;
-      try { conversations.push(await this.load(id)); }
+      try { conversations.push(await this.#loadSummary(id)); }
       catch (error) { this.#options.onWarning?.(`Skipping invalid conversation '${file}': ${String(error)}`); }
     }
-    return conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((c) => ({
-      id: c.id, title: c.title, model: c.model, createdAt: c.createdAt,
-      updatedAt: c.updatedAt, turnCount: c.turns.length, status: c.status,
-    }));
+    return conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async #loadSummary(id: string): Promise<ConversationSummary> {
+    await this.#queues.get(id);
+    let summary: ConversationSummary | undefined;
+    for await (const entry of readSessionEntries(this.filePath(id))) {
+      if (!summary) {
+        const header = headerSchema.parse(entry);
+        if (header.id !== id) throw new Error("Session ID does not match its filename.");
+        summary = {
+          id, title: header.title, model: header.model, createdAt: header.timestamp,
+          updatedAt: header.timestamp, turnCount: 0, status: "idle",
+        };
+        continue;
+      }
+      if (entry.type.startsWith("session.")) summary.updatedAt = entry.timestamp;
+      switch (entry.type) {
+        case "session.renamed": summary.title = z.string().min(1).parse(entry.title); break;
+        case "session.turn_started": summary.status = "running"; break;
+        case "session.turn_failed": summary.status = "failed"; break;
+        case "session.turn_completed":
+          turnSchema.parse(entry.turn);
+          summary.turnCount++;
+          summary.status = "idle";
+          break;
+      }
+    }
+    if (!summary) throw new Error("Session header is missing.");
+    return summary;
   }
 
   async load(id: string): Promise<Conversation> {
@@ -137,7 +161,7 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
         case "session.tool_output": conversation.context.push(entry.output as ModelInputItem); break;
         case "session.turn_completed": {
           const turn = turnSchema.parse(entry.turn);
-          // Imported history and embedders without runner events still have a transcript.
+          // Embedders without runner events still have a transcript.
           if (!hasUser) conversation.context.push({ role: "user", content: turn.user });
           if (!hasResponse) conversation.context.push({ role: "assistant", content: turn.assistant });
           conversation.turns.push(turn);
@@ -241,44 +265,46 @@ export class JsonlConversationStore implements ConversationStore, OpenAITraceSin
     this.#queues.set(id, next);
     await next;
   }
-
-  async #importLegacy(): Promise<void> {
-    const directory = this.#options.legacyDirectory;
-    if (!directory) return;
-    let files: string[];
-    try { files = await readdir(directory); }
-    catch (error) { if (hasCode(error, "ENOENT")) return; throw error; }
-    for (const file of files.filter((name) => name.endsWith(".json"))) {
-      try {
-        const old = z.object({ id: z.string().uuid(), model: z.string(), title: z.string(), createdAt: z.string(), turns: z.array(turnSchema) }).parse(JSON.parse(await readFile(path.join(directory, file), "utf8")));
-        const entries = [
-          headerSchema.parse({ type: "session.created", schemaVersion: 2, id: old.id, model: old.model, title: old.title, timestamp: old.createdAt }),
-          ...old.turns.map((turn) => ({ type: "session.turn_completed", timestamp: turn.createdAt, turn })),
-        ];
-        await mkdir(this.#directory, { recursive: true });
-        await writeFile(this.filePath(old.id), entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
-      } catch (error) {
-        if (!hasCode(error, "EEXIST")) this.#options.onWarning?.(`Unable to import '${file}': ${String(error)}`);
-      }
-    }
-  }
 }
 
 export function parseSessionEntries(contents: string): SessionEntry[] {
   const lines = contents.split("\n");
   const entries: SessionEntry[] = [];
   for (const [index, line] of lines.entries()) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line) as SessionEntry;
-      if (!entry || typeof entry.type !== "string") throw new Error(`Invalid journal entry at line ${index + 1}.`);
-      entries.push(entry);
-    } catch (error) {
-      if (index === lines.length - 1 && error instanceof SyntaxError) break;
-      throw error;
-    }
+    const entry = parseSessionLine(line, index + 1, index === lines.length - 1);
+    if (entry) entries.push(entry);
   }
   return entries;
+}
+
+function parseSessionLine(line: string, lineNumber: number, partialTail: boolean): SessionEntry | undefined {
+  if (!line.trim()) return undefined;
+  try {
+    const entry = JSON.parse(line) as SessionEntry;
+    if (!entry || typeof entry.type !== "string") throw new Error(`Invalid journal entry at line ${lineNumber}.`);
+    return entry;
+  } catch (error) {
+    if (partialTail && error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+
+/** Keep at most a buffered chunk and the current entry, never the entire debug journal. */
+async function* readSessionEntries(file: string): AsyncGenerator<SessionEntry> {
+  const stream = createReadStream(file, { encoding: "utf8" });
+  let pending = "";
+  let lineNumber = 0;
+  for await (const chunk of stream) {
+    pending += chunk;
+    let boundary: number;
+    while ((boundary = pending.indexOf("\n")) !== -1) {
+      const entry = parseSessionLine(pending.slice(0, boundary), ++lineNumber, false);
+      pending = pending.slice(boundary + 1);
+      if (entry) yield entry;
+    }
+  }
+  const tail = parseSessionLine(pending, lineNumber + 1, true);
+  if (tail) yield tail;
 }
 
 /** Unknown execution outcomes become context, never automatic tool re-execution. */

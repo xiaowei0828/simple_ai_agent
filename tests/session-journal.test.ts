@@ -1,9 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
-import { AgentRunner } from "../src/core/agent-runner.js";
 import type { ModelAdapter, ModelRequest, ModelResponse } from "../src/core/types.js";
 import { runInteractiveSession } from "../src/cli/interactive-session.js";
 import { JsonlConversationStore, parseSessionEntries, replayConversation } from "../src/history/session-store.js";
@@ -11,7 +9,7 @@ import { OpenAIModel } from "../src/model/openai-model.js";
 import { AllowAllApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
-import { createTempDirectoryFixture } from "./test-utils.js";
+import { createTempDirectoryFixture, scriptedIO, createTestRunner } from "./test-utils.js";
 
 const createTempDirectory = createTempDirectoryFixture();
 async function fixture() {
@@ -19,9 +17,6 @@ async function fixture() {
   return { root, directory: path.join(root, ".agent-runs") };
 }
 
-function io(inputs: string[]) {
-  return { async prompt() { return inputs.shift(); }, writeAssistant() {}, writeStatus() {} };
-}
 const response = (id: string, text = "done"): ModelResponse => ({ id, outputText: text, toolCalls: [] });
 
 describe("unified session journal", () => {
@@ -51,10 +46,10 @@ describe("unified session journal", () => {
         ],
       };
     } };
-    const runner = new AgentRunner({ model, modelName: "test-model", instructions: "fixture", tools,
+    const runner = createTestRunner({ model, instructions: "fixture", tools,
       toolContext: { workspaceRoot: root }, approvalPolicy: new AllowAllApprovalPolicy(),
       onEvent: (event) => store.recordAgentEvent(event) });
-    await runInteractiveSession({ agent: runner, initialModel: "test-model", historyStore: store, io: io(["write a marker", "/exit"]) });
+    await runInteractiveSession({ agent: runner, initialModel: "test-model", historyStore: store, io: scriptedIO(["write a marker", "/exit"]) });
     const [saved] = await store.list();
     expect(saved).toMatchObject({ status: completed ? "idle" : "failed", turnCount: completed ? 1 : 0 });
     const before = await readFile(store.filePath(saved!.id), "utf8");
@@ -66,12 +61,12 @@ describe("unified session journal", () => {
 
     const reopened = new JsonlConversationStore(directory);
     const continuedRequests: ModelRequest[] = [];
-    const continued = new AgentRunner({
+    const continued = createTestRunner({
       model: { async respond(request) { continuedRequests.push(request); return response("response-2"); } },
-      modelName: "test-model", instructions: "fixture", tools, toolContext: { workspaceRoot: root },
+      instructions: "fixture", tools, toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(), onEvent: (event) => reopened.recordAgentEvent(event),
     });
-    await runInteractiveSession({ agent: continued, initialModel: "test-model", historyStore: reopened, io: io(["1", "continue", "/exit"]) });
+    await runInteractiveSession({ agent: continued, initialModel: "test-model", historyStore: reopened, io: scriptedIO(["1", "continue", "/exit"]) });
     expect(executions).toBe(1);
     expect(continuedRequests).toHaveLength(1);
     expect(continuedRequests[0]?.previousResponseId).toBeUndefined();
@@ -94,7 +89,7 @@ describe("unified session journal", () => {
     const session = await store.create({ model: "test", title: "denials" });
     await store.beginTurn(session.id, "work");
     let count = 0;
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model: { async respond() {
         if (count++) throw new Error("offline");
         return { id: "r1", outputText: "", toolCalls: [
@@ -188,18 +183,4 @@ describe("unified session journal", () => {
     expect((await reopened.load(session.id)).pendingTask).toBe("continue");
   });
 
-  it("imports old history once without overwriting newly appended turns", async () => {
-    const { root, directory } = await fixture();
-    const legacyDirectory = path.join(root, ".agent-history");
-    await mkdir(legacyDirectory);
-    const id = randomUUID();
-    const turn = { user: "old question", assistant: "old answer", responseId: "old-id", createdAt: new Date().toISOString() };
-    await writeFile(path.join(legacyDirectory, `${id}.json`), JSON.stringify({ schemaVersion: 1, id, model: "test", title: "old", createdAt: turn.createdAt, turns: [turn] }));
-    const store = new JsonlConversationStore(directory, { legacyDirectory });
-    expect(await store.list()).toHaveLength(1);
-    await store.appendTurn(id, { ...turn, responseId: "new-id" });
-    expect((await store.list())[0]?.turnCount).toBe(2);
-    expect((await store.load(id)).turns.at(-1)?.responseId).toBe("new-id");
-    expect(await readdir(directory)).toEqual([`${id}.jsonl`]);
-  });
 });

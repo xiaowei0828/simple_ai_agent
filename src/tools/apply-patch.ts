@@ -1,13 +1,28 @@
 import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, open, readFile, realpath, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { createWorkspacePathResolver, type WorkspacePathResolver } from "../policy/path-policy.js";
+import { resolvePatchPath } from "./patch-paths.js";
 import { applyChunks } from "./patch-content.js";
 import { MAX_PATCH_BYTES, parsePatch, type FilePatch } from "./patch-parser.js";
 import type { AgentTool } from "./types.js";
 
 const inputSchema = z.object({ patch: z.string().min(1) }).strict();
+interface PatchInput {
+  patch: string;
+  /** Canonical targets prepared by the host, never accepted from model arguments. */
+  resolvedPaths?: Record<string, string>;
+}
+
+async function prepareInput(input: PatchInput, workspaceRoot: string): Promise<PatchInput> {
+  const resolvedPaths: Record<string, string> = Object.create(null);
+  for (const patch of parsePatch(input.patch)) {
+    for (const target of patch.kind === "update" && patch.moveTo ? [patch.path, patch.moveTo] : [patch.path]) {
+      resolvedPaths[target] = await resolvePatchPath(workspaceRoot, target);
+    }
+  }
+  return { resolvedPaths, patch: input.patch };
+}
 
 interface PreparedChange {
   patch: FilePatch;
@@ -26,34 +41,20 @@ async function statIfExists(filePath: string): Promise<Stats | undefined> {
   }
 }
 
-// Resolve parent aliases, but not the last component: deleting a symlink must
-// delete the link itself, never the file it points to.
-async function canonicalTarget(filePath: string): Promise<string> {
-  let parent = path.dirname(filePath);
-  const missing = [path.basename(filePath)];
-  while (true) {
-    if (await statIfExists(parent)) {
-      return path.join(await realpath(parent), ...missing);
-    }
-    missing.unshift(path.basename(parent));
-    const next = path.dirname(parent);
-    if (next === parent) throw new Error("No existing parent for patch target.");
-    parent = next;
-  }
-}
-
 async function prepareChanges(
-  patches: FilePatch[], resolver: WorkspacePathResolver,
+  patches: FilePatch[], resolve: (target: string) => Promise<string>,
 ): Promise<PreparedChange[]> {
   const changes: PreparedChange[] = [];
   const targets = new Set<string>();
   for (const patch of patches) {
-    const source = await resolver.resolveForMutation(patch.path);
+    const source = await resolve(patch.path);
     const destination = patch.kind === "update" && patch.moveTo
-      ? await resolver.resolveForMutation(patch.moveTo) : source;
+      ? await resolve(patch.moveTo) : source;
+    if (patch.kind === "update" && patch.moveTo && source === destination) {
+      throw new Error(`Conflicting move targets through a path alias: ${patch.path}.`);
+    }
     for (const target of new Set([source, destination])) {
-      const canonical = await canonicalTarget(target);
-      const key = process.platform === "win32" ? canonical.toLowerCase() : canonical;
+      const key = process.platform === "win32" ? target.toLowerCase() : target;
       for (const other of targets) {
         if (key === other || key.startsWith(`${other}${path.sep}`) || other.startsWith(`${key}${path.sep}`)) {
           throw new Error(`Conflicting patch targets through a path alias: ${patch.path}.`);
@@ -127,13 +128,13 @@ async function writeUpdatedFile(change: PreparedChange): Promise<void> {
   }
 }
 
-export function createApplyPatchTool(): AgentTool<z.infer<typeof inputSchema>> {
+export function createApplyPatchTool(): AgentTool<PatchInput> {
   return {
     risk: "write",
     definition: {
       type: "function",
       name: "apply_patch",
-      description: "Create, edit, move, or delete workspace files with a patch. Read existing files using run_command first. Wrap the patch in *** Begin Patch and *** End Patch. Use *** Add File: path with + lines; *** Delete File: path; or *** Update File: path with @@ chunks (space=context, -=remove, +=add). An update may include *** Move to: path before its chunks. @@ text anchors a chunk after an exact line; *** End of File requires a chunk to match the file end. Context must match exactly and unambiguously. Paths use workspace-relative forward slashes. New parent directories are created. Existing add/move destinations, binary updates, and conflicting targets are rejected. All changes are validated before writing; I/O failures may still leave partial changes. Requires host approval.",
+      description: "Create, edit, move, or delete files with a patch. Read existing files using run_command first. Wrap the patch in *** Begin Patch and *** End Patch. Use *** Add File: path with + lines; *** Delete File: path; or *** Update File: path with @@ chunks (space=context, -=remove, +=add). An update may include *** Move to: path before its chunks. @@ text anchors a chunk after an exact line; *** End of File requires a chunk to match the file end. Context must match exactly and unambiguously. Paths use forward slashes and may be workspace-relative (including ../) or absolute. New parent directories are created. Existing add/move destinations, binary updates, and conflicting targets are rejected. All changes are validated before writing; I/O failures may still leave partial changes. Workspace targets are automatically approved; external targets require host confirmation unless --yes is set.",
       strict: true,
       parameters: {
         type: "object",
@@ -149,28 +150,36 @@ export function createApplyPatchTool(): AgentTool<z.infer<typeof inputSchema>> {
       parsePatch(parsed.patch);
       return parsed;
     },
+    prepare: (input, context) => prepareInput(input, context.workspaceRoot),
     async execute(input, context) {
-      const resolver = await createWorkspacePathResolver(context.workspaceRoot);
-      const changes = await prepareChanges(parsePatch(input.patch), resolver);
+      const prepared = input.resolvedPaths ? input : await prepareInput(input, context.workspaceRoot);
+      const resolve = async (target: string): Promise<string> => {
+        const current = await resolvePatchPath(context.workspaceRoot, target);
+        if (current !== prepared.resolvedPaths![target]) {
+          throw new Error(`Patch target changed after approval: ${target}. Request approval again.`);
+        }
+        return current;
+      };
+      const changes = await prepareChanges(parsePatch(input.patch), resolve);
       const attempted: string[] = [];
       const completed: string[] = [];
       try {
         for (const change of changes) {
           const { patch, source, destination, content, before } = change;
-          await resolver.resolveForMutation(patch.path);
+          await resolve(patch.path);
           await assertUnchanged(change);
           const outputPath = patch.kind === "update" && patch.moveTo ? patch.moveTo : patch.path;
-          await resolver.resolveForMutation(outputPath);
+          await resolve(outputPath);
           attempted.push(outputPath);
           if (patch.kind === "delete") {
             await unlink(source);
           } else if (patch.kind === "add" || destination !== source) {
             await mkdir(path.dirname(destination), { recursive: true });
-            await resolver.resolveForMutation(outputPath);
+            await resolve(outputPath);
             await writeFile(destination, content!, { encoding: "utf8", flag: "wx", mode: before?.mode });
             if (destination !== source) {
               attempted.push(patch.path);
-              await resolver.resolveForMutation(patch.path);
+              await resolve(patch.path);
               await assertUnchanged(change);
               await unlink(source);
             }

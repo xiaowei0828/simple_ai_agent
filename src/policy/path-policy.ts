@@ -1,4 +1,4 @@
-import { lstat, realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 
 const BLOCKED_SEGMENTS = new Set([
@@ -57,79 +57,22 @@ export function assertSafeRelativePath(relativePath: string): void {
   }
 }
 
-export interface WorkspacePathResolver {
-  resolveExisting(relativePath: string): Promise<string>;
-  resolveForMutation(relativePath: string): Promise<string>;
-}
-
-export async function createWorkspacePathResolver(
-  workspaceRoot: string,
-): Promise<WorkspacePathResolver> {
-  const lexicalRoot = path.resolve(workspaceRoot);
-  const canonicalRoot = await realpath(lexicalRoot);
-
-  return {
-    async resolveExisting(relativePath: string): Promise<string> {
-      assertSafeRelativePath(relativePath);
-      const lexicalCandidate = path.resolve(lexicalRoot, relativePath);
-      if (!isPathInside(lexicalRoot, lexicalCandidate)) {
-        throw new Error("Path escapes the workspace.");
-      }
-
-      const canonicalCandidate = await realpath(lexicalCandidate);
-      if (!isPathInside(canonicalRoot, canonicalCandidate)) {
-        throw new Error("Resolved path escapes the workspace through a symbolic link.");
-      }
-      assertSafeRelativePath(path.relative(canonicalRoot, canonicalCandidate) || ".");
-      return lexicalCandidate;
-    },
-
-    async resolveForMutation(relativePath: string): Promise<string> {
-      assertSafeRelativePath(relativePath);
-      const lexicalCandidate = path.resolve(lexicalRoot, relativePath);
-      if (!isPathInside(lexicalRoot, lexicalCandidate) || lexicalCandidate === lexicalRoot) {
-        throw new Error("Path escapes the workspace or points to the workspace root.");
-      }
-
-      // New files may need new directories. Check the closest existing ancestor
-      // without skipping dangling symlinks, which realpath alone would miss.
-      let ancestor = path.dirname(lexicalCandidate);
-      while (true) {
-        try {
-          await lstat(ancestor);
-          break;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          const parent = path.dirname(ancestor);
-          if (parent === ancestor) throw error;
-          ancestor = parent;
-        }
-      }
-      const canonicalParent = await realpath(ancestor);
-      if (!isPathInside(canonicalRoot, canonicalParent)) {
-        throw new Error("Resolved parent path escapes the workspace through a symbolic link.");
-      }
-      assertSafeRelativePath(path.relative(canonicalRoot, canonicalParent) || ".");
-      if (!(await stat(canonicalParent)).isDirectory()) {
-        throw new Error("Mutation parent must be a directory.");
-      }
-      return lexicalCandidate;
-    },
-  };
-}
-
 export async function resolveExistingWorkspacePath(
   workspaceRoot: string,
   relativePath: string,
 ): Promise<string> {
-  const resolver = await createWorkspacePathResolver(workspaceRoot);
-  const lexicalCandidate = await resolver.resolveExisting(relativePath);
-  // Keep the workspace's original path spelling after the canonical safety check.
-  // On macOS, for example, /var resolves to /private/var; returning the canonical
-  // candidate would make later workspace-relative paths incorrectly start with ../.
+  const lexicalRoot = path.resolve(workspaceRoot);
+  const canonicalRoot = await realpath(lexicalRoot);
+  assertSafeRelativePath(relativePath);
+  const lexicalCandidate = path.resolve(lexicalRoot, relativePath);
+  if (!isPathInside(lexicalRoot, lexicalCandidate)) {
+    throw new Error("Path escapes the workspace.");
+  }
+  const canonicalCandidate = await realpath(lexicalCandidate);
+  if (!isPathInside(canonicalRoot, canonicalCandidate)) {
+    throw new Error("Resolved path escapes the workspace through a symbolic link.");
+  }
+  assertSafeRelativePath(path.relative(canonicalRoot, canonicalCandidate) || ".");
+  // Preserve the caller's path spelling after canonical safety checks (e.g. /var on macOS).
   return lexicalCandidate;
-}
-
-export function toWorkspaceRelative(workspaceRoot: string, absolutePath: string): string {
-  return path.relative(workspaceRoot, absolutePath).split(path.sep).join("/") || ".";
 }

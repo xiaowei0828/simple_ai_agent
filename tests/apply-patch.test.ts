@@ -129,8 +129,6 @@ describe("apply_patch", () => {
     const tool = createApplyPatchTool();
     for (const patch of [
       "", "*** Begin Patch\n*** End Patch", "*** Begin Patch\n*** Add File: file.txt\n+missing end",
-      "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch",
-      "*** Begin Patch\n*** Add File: /absolute.txt\n+x\n*** End Patch",
       "*** Begin Patch\n*** Add File: C:\\escape.txt\n+x\n*** End Patch",
       "*** Begin Patch\n*** Add File: .env\n+x\n*** End Patch",
       "*** Begin Patch\n*** Delete File: .git/config\n*** End Patch",
@@ -159,15 +157,15 @@ describe("apply_patch", () => {
     await expect(apply(root, "*** Update File: dir\n@@\n+x")).rejects.toThrow("only accepts");
   });
 
-  it("rejects parent symlink escapes even when deeper parent directories do not exist", async () => {
+  it("resolves external parent symlinks but rejects dangling parents", async () => {
     const root = await fixture();
     const outside = await fixture();
     await fs.symlink(outside, path.join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
-    await expect(apply(root, "*** Add File: escape/new/deep/file.txt\n+x")).rejects.toThrow("escapes");
-    expect(await fs.readdir(outside)).toEqual([]);
+    await apply(root, "*** Add File: escape/new/deep/file.txt\n+x");
+    expect(await fs.readFile(path.join(outside, "new/deep/file.txt"), "utf8")).toBe("x\n");
     await fs.symlink(path.join(outside, "missing"), path.join(root, "dangling"), process.platform === "win32" ? "junction" : "dir");
     await expect(apply(root, "*** Add File: dangling/new/file.txt\n+x")).rejects.toThrow();
-    expect(await fs.readdir(outside)).toEqual([]);
+    expect(await fs.readdir(outside)).toEqual(["new"]);
   });
 
   it("rejects aliases of protected directories and duplicate canonical targets", async () => {
@@ -179,6 +177,9 @@ describe("apply_patch", () => {
     await expect(apply(root, "*** Add File: settings/new/file.txt\n+x")).rejects.toThrow("blocked");
     await expect(apply(root, "*** Add File: src/new.txt\n+x\n*** Add File: alias/new.txt\n+y")).rejects.toThrow("alias");
     expect(await fs.readdir(path.join(root, "src"))).toEqual([]);
+    await fs.writeFile(path.join(root, "src/file.txt"), "original\n");
+    await expect(apply(root, "*** Update File: src/file.txt\n*** Move to: alias/file.txt")).rejects.toThrow("alias");
+    expect(await fs.readFile(path.join(root, "src/file.txt"), "utf8")).toBe("original\n");
   });
 
   it("does not overwrite a symlink and deletes only the link", async () => {

@@ -89,6 +89,12 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
     }
   }
 
+  function resetConversation(conversation?: Conversation): void {
+    currentConversation = conversation;
+    previousResponseId = undefined;
+    continuation = undefined;
+  }
+
   async function saveReasoningEffort(): Promise<void> {
     if (currentConversation && currentReasoningEffort && currentConversation.reasoningEffort !== currentReasoningEffort) {
       currentConversation = await options.historyStore.setReasoningEffort(currentConversation.id, currentReasoningEffort);
@@ -109,9 +115,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       case "/quit":
         return;
       case "/new":
-        currentConversation = undefined;
-        previousResponseId = undefined;
-        continuation = undefined;
+        resetConversation();
         options.io.writeStatus("Started a new conversation.");
         continue;
       case "/history":
@@ -136,13 +140,12 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
             );
             continue;
           }
-          currentConversation = await options.historyStore.load(selected.id);
-          previousResponseId = undefined;
-          continuation = undefined;
-          currentModel = currentConversation.model;
+          const conversation = await options.historyStore.load(selected.id);
+          resetConversation(conversation);
+          currentModel = conversation.model;
           currentReasoningEffort = restoreReasoningEffort();
           availableModels = uniqueModels(currentModel, availableModels);
-          options.io.writeStatus(formatResumedConversation(currentConversation));
+          options.io.writeStatus(formatResumedConversation(conversation));
         } catch (error) {
           options.io.writeStatus(`Unable to resume conversation: ${errorMessage(error)}`);
         }
@@ -249,10 +252,8 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           continue;
         }
         currentModel = selectedModel;
-        currentConversation = undefined;
+        resetConversation();
         currentReasoningEffort = restoreReasoningEffort();
-        previousResponseId = undefined;
-        continuation = undefined;
         options.io.writeStatus(`Switched to model: ${selectedModel}. Started a new conversation.`);
         continue;
       }

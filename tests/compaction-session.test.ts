@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
-import { AgentRunner } from "../src/core/agent-runner.js";
 import { estimateTokens } from "../src/core/context-compaction.js";
 import type { AgentEvent, ModelAdapter, ModelRequest } from "../src/core/types.js";
 import { runInteractiveSession } from "../src/cli/interactive-session.js";
@@ -13,7 +12,7 @@ import { AllowAllApprovalPolicy } from "../src/policy/approval-policy.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { renderTraceReportHtml } from "../src/trace-viewer/render-html.js";
-import { createTempDirectoryFixture } from "./test-utils.js";
+import { createTempDirectoryFixture, scriptedIO, createTestRunner } from "./test-utils.js";
 
 const contextWindow = 4_000;
 const createTempDirectory = createTempDirectoryFixture();
@@ -25,9 +24,7 @@ async function fixture() {
   await store.appendTurn(session.id, { user: "old task", assistant: "old progress ".repeat(300), createdAt: new Date().toISOString() });
   return { root, directory, store, id: session.id };
 }
-function io(inputs: string[], outputs: string[] = [], statuses: string[] = []) {
-  return { async prompt() { return inputs.shift(); }, writeAssistant(text: string) { outputs.push(text); }, writeStatus(text: string) { statuses.push(text); } };
-}
+
 const answer = (id: string, text = "done") => ({ id, outputText: text, toolCalls: [] });
 
 describe("compacted sessions", () => {
@@ -39,12 +36,12 @@ describe("compacted sessions", () => {
     const { root, store, id } = await fixture();
     const initial = await store.load(id);
     const requests: ModelRequest[] = [];
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model: { async respond(request) {
         requests.push(request);
         return answer("response", request.purpose ? "Old work summary" : "done");
       } },
-      modelName: "large", instructions: "fixture", tools: new ToolRegistry([]), toolContext: { workspaceRoot: root },
+      modelName: "large", instructions: "fixture", toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(), contextWindow: (name) => name === "small" ? 4_000 : 8_000,
     });
     await runner.run("continue", { model, history: initial.context,
@@ -96,7 +93,7 @@ describe("compacted sessions", () => {
       };
       return answer("final-id");
     } };
-    const runner = new AgentRunner({ model, modelName: "test", instructions: "fixture", tools, toolContext: { workspaceRoot: root },
+    const runner = createTestRunner({ model, modelName: "test", instructions: "fixture", tools, toolContext: { workspaceRoot: root },
       approvalPolicy: { async approve() { approvals++; return true; } }, contextWindow: () => contextWindow,
       onEvent: async (event) => { events.push(event); await store.recordAgentEvent(event); },
     });
@@ -138,16 +135,16 @@ describe("compacted sessions", () => {
     let summaries = 0;
     for (let cycle = 1; cycle <= 2; cycle++) {
       const reopened = new JsonlConversationStore(directory);
-      const runner = new AgentRunner({
+      const runner = createTestRunner({
         model: { async respond(request) {
           requests.push(request);
           if (request.purpose) return answer("summary-id", `Merged summary ${++summaries}`);
           return answer(`live-${cycle}`, "current progress ".repeat(100));
-        } }, modelName: "test", instructions: "fixture", tools: new ToolRegistry([]), toolContext: { workspaceRoot: root },
+        } }, modelName: "test", instructions: "fixture", toolContext: { workspaceRoot: root },
         approvalPolicy: new AllowAllApprovalPolicy(), contextWindow: () => contextWindow, onEvent: (event) => reopened.recordAgentEvent(event),
       });
       await runInteractiveSession({ agent: runner, initialModel: "test", historyStore: reopened,
-        io: io([id, "/compact focus on pending changes", `continue ${cycle}`, "/exit"], outputs) });
+        io: scriptedIO([id, "/compact focus on pending changes", `continue ${cycle}`, "/exit"], { assistant: outputs }) });
       const loaded = await reopened.load(id);
       expect(loaded.summary).toBe(`Merged summary ${cycle}`);
       expect(loaded.turns).toHaveLength(2 + cycle);
@@ -174,7 +171,7 @@ describe("compacted sessions", () => {
     const { root, directory, store, id } = await fixture();
     const initial = await store.load(id);
     let normalRequests = 0;
-    const runner = new AgentRunner({ model: { async respond(request) {
+    const runner = createTestRunner({ model: { async respond(request) {
       if (request.purpose) {
         if (failure === "summary fails") throw new Error("summary offline");
         if (failure === "summary returns tools") return {
@@ -187,7 +184,7 @@ describe("compacted sessions", () => {
       }
       normalRequests++;
       throw new Error("task offline");
-    } }, modelName: "test", instructions: "fixture", tools: new ToolRegistry([]), toolContext: { workspaceRoot: root },
+    } }, modelName: "test", instructions: "fixture", toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(), contextWindow: () => contextWindow, onEvent: async (event) => {
         if (failure === "checkpoint fails" && event.type === "compaction_completed") throw new Error("disk full");
         await store.recordAgentEvent(event);
@@ -218,19 +215,19 @@ describe("compacted sessions", () => {
     const requests: ModelRequest[] = [];
     const outputs: string[] = [];
     const statuses: string[] = [];
-    const runner = new AgentRunner({ model: { async respond(request) {
+    const runner = createTestRunner({ model: { async respond(request) {
       requests.push(request);
       if (request.purpose) {
         if (failed) throw new Error("summary offline");
         return answer("summary-id", "Old work summary");
       }
       return answer("live-id", "recent progress ".repeat(100));
-    } }, modelName: "test", instructions: "fixture", tools: new ToolRegistry([]), toolContext: { workspaceRoot: root },
+    } }, modelName: "test", instructions: "fixture", toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(), contextWindow: () => contextWindow,
       onEvent: (event) => store.recordAgentEvent(event),
     });
     await runInteractiveSession({ agent: runner, initialModel: "test", historyStore: store,
-      io: io([id, "live task", "/compact", "follow up", "/exit"], outputs, statuses) });
+      io: scriptedIO([id, "live task", "/compact", "follow up", "/exit"], { assistant: outputs, status: statuses }) });
     expect(requests).toHaveLength(3);
     expect(requests[2]?.previousResponseId).toBeUndefined();
     expect(outputs).toHaveLength(2);
@@ -248,7 +245,7 @@ describe("compacted sessions", () => {
     await store.appendTurn(id, { user: "recent task", assistant: "recent progress ".repeat(100), createdAt: new Date().toISOString() });
     const initial = await store.load(id);
     let requests = 0;
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model: new OpenAIModel({ client: new OpenAI({ apiKey: "fixture-key", baseURL: "https://fixture.test/v1", maxRetries: 0,
         fetch: async (_input, init) => {
           requests++;
@@ -260,7 +257,7 @@ describe("compacted sessions", () => {
             usage: { input_tokens: 38_741, output_tokens: 4_096, total_tokens: 42_837, output_tokens_details: { reasoning_tokens: 2_882 } },
           }), { headers: { "content-type": "application/json" } });
         },
-      }) }), modelName: "test", instructions: "fixture", tools: new ToolRegistry([]), toolContext: { workspaceRoot: root },
+      }) }), modelName: "test", instructions: "fixture", toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(), contextWindow: () => contextWindow, reasoningEffort: "high",
       onEvent: (event) => store.recordAgentEvent(event),
     });
@@ -299,7 +296,7 @@ describe("compacted sessions", () => {
           }), { headers: { "content-type": "application/json" } });
         },
       }) }));
-    const runner = new AgentRunner({ model, modelName: "test", instructions: "agent instructions", tools: new ToolRegistry([]),
+    const runner = createTestRunner({ model, modelName: "test", instructions: "agent instructions",
       toolContext: { workspaceRoot: root }, approvalPolicy: new AllowAllApprovalPolicy(), contextWindow: () => contextWindow,
       stream: false, onEvent: (event) => store.recordAgentEvent(event),
     });

@@ -28,7 +28,7 @@ function buildBaseInstructions(environment: RuntimeEnvironment): string {
 
 Rules:
 - Follow the user's request. Inspect relevant files, make the smallest useful change, and verify results before claiming success.
-- Work inside the workspace. Read files before editing, and ask before ambiguous destructive changes.
+- Prefer working inside the workspace. External file changes require host approval unless --yes is set. Read files before editing, and ask before ambiguous destructive changes.
 - Use run_command for inspection, builds, and tests; use apply_patch for file changes. Respect tool approval requirements.
 - Prefer rg and rg --files for search. Keep searches and file reads focused, and narrow them if output is truncated.
 - Follow the workspace root AGENTS.md. User instructions take precedence over AGENTS.md, and AGENTS.md takes precedence over skill guidance.

@@ -8,6 +8,8 @@ export interface AgentTool<TInput = unknown> {
   definition: ToolDefinition;
   risk: ToolRisk;
   parse(input: unknown): TInput;
+  /** Resolve approval-sensitive inputs before asking the host. Must not mutate files. */
+  prepare?(input: TInput, context: ToolContext): Promise<TInput>;
   execute(input: TInput, context: ToolContext): Promise<unknown>;
 }
 

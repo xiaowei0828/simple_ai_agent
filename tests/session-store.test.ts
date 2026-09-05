@@ -1,6 +1,6 @@
-import { stat, writeFile } from "node:fs/promises";
+import { appendFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createConversationTitle,
   JsonlConversationStore,
@@ -15,6 +15,48 @@ async function fixtureDirectory(): Promise<string> {
 }
 
 describe("JsonlConversationStore", () => {
+  it("lists metadata from a large debug journal without loading conversation context", async () => {
+    const store = new JsonlConversationStore(await fixtureDirectory());
+    const session = await store.create({ model: "test", title: "initial" });
+    const timestamp = "2030-01-01T00:00:00.000Z";
+    const entries = [
+      { type: "session.turn_started", task: "question" },
+      { type: "session.model_response", response: { id: "answer", outputText: "中文".repeat(40_000), toolCalls: [] } },
+      ...Array.from({ length: 200 }, () => ({ type: "openai.stream", event: { delta: "debug".repeat(500) } })),
+      { type: "session.turn_completed", turn: { user: "question", assistant: "answer", createdAt: timestamp } },
+      { type: "session.renamed", title: "updated" },
+      { type: "session.turn_started", task: "follow up" },
+      { type: "session.turn_failed", error: "interrupted" },
+      { type: "openai.error", timestamp: "2031-01-01T00:00:00.000Z" },
+    ];
+    await appendFile(store.filePath(session.id), entries.map((entry) => JSON.stringify({ timestamp, ...entry })).join("\n") + "\n");
+    const loaded = await store.load(session.id);
+    const load = vi.spyOn(store, "load").mockRejectedValue(new Error("list must not rebuild context"));
+    expect(await store.list()).toEqual([{
+      id: loaded.id, title: loaded.title, model: loaded.model, createdAt: loaded.createdAt,
+      updatedAt: loaded.updatedAt, turnCount: loaded.turns.length, status: loaded.status,
+    }]);
+    expect(load).not.toHaveBeenCalled();
+    load.mockRestore();
+    await store.beginTurn(session.id, "retry");
+    expect((await store.list())[0]?.status).toBe("running");
+  });
+
+  it.each([
+    { tail: '{"type":"session.turn_failed"', valid: true },
+    { tail: '{"type":"session.turn_failed", "timestamp":"2030-01-01"}', valid: true },
+    { tail: '{broken}\n', valid: false },
+  ])("handles journal tails consistently: $tail", async ({ tail, valid }) => {
+    const warnings: string[] = [];
+    const store = new JsonlConversationStore(await fixtureDirectory(), { onWarning: (message) => warnings.push(message) });
+    const session = await store.create({ model: "test", title: "tail" });
+    await appendFile(store.filePath(session.id), tail);
+    expect(await store.list()).toHaveLength(valid ? 1 : 0);
+    expect(warnings).toHaveLength(valid ? 0 : 1);
+    if (valid) expect((await store.list())[0]?.status).toBe((await store.load(session.id)).status);
+    else await expect(store.load(session.id)).rejects.toThrow();
+  });
+
   it("creates, updates, renames, and lists conversations", async () => {
     const historyDirectory = await fixtureDirectory();
     const store = new JsonlConversationStore(historyDirectory);

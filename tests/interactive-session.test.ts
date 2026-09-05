@@ -6,7 +6,7 @@ import { AgentResponseError, type AgentRunOptions } from "../src/core/agent-runn
 import type { AgentRunResult } from "../src/core/types.js";
 import { parseOpenAITraceJsonl } from "../src/trace-viewer/parse-trace.js";
 import { JsonlConversationStore } from "../src/history/session-store.js";
-import { createTempDirectoryFixture } from "./test-utils.js";
+import { createTempDirectoryFixture, scriptedIO } from "./test-utils.js";
 
 const createTempDirectory = createTempDirectoryFixture();
 
@@ -24,23 +24,6 @@ async function runSession(
     historyStore: options.historyStore ?? await createStore(),
     initialModel: options.initialModel ?? "test-model",
   });
-}
-
-function scriptedIO(
-  inputs: string[],
-  outputs: { assistant?: string[]; status?: string[] } = {},
-): InteractiveSessionOptions["io"] {
-  return {
-    async prompt() {
-      return inputs.shift();
-    },
-    writeAssistant(output) {
-      outputs.assistant?.push(output);
-    },
-    writeStatus(output) {
-      outputs.status?.push(output);
-    },
-  };
 }
 
 class FakeInteractiveAgent implements InteractiveAgent {

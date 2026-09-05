@@ -7,6 +7,7 @@ import {
   CallbackApprovalPolicy,
 } from "../src/policy/approval-policy.js";
 import { resolveRuntimeShell, shellInvocation } from "../src/tools/process-runner.js";
+import { createApplyPatchTool } from "../src/tools/apply-patch.js";
 import { createRunCommandTool } from "../src/tools/run-command.js";
 import { createTempDirectoryFixture } from "./test-utils.js";
 
@@ -19,12 +20,14 @@ describe("approval policy", () => {
       fallbackRequests.push(request.toolName);
       return false;
     });
-    const policy = new AutoApproveWorkspaceFileOperationsPolicy(fallback);
+    const root = await createTempDirectory("approval-");
+    const policy = new AutoApproveWorkspaceFileOperationsPolicy(fallback, root);
+    const tool = createApplyPatchTool();
 
     await expect(policy.approve({
       toolName: "apply_patch",
       risk: "write",
-      arguments: { patch: "*** Begin Patch\n*** Add File: src/example.ts\n+export {};\n*** End Patch" },
+      arguments: await tool.prepare!(tool.parse({ patch: "*** Begin Patch\n*** Add File: src/example.ts\n+export {};\n*** End Patch" }), { workspaceRoot: root }),
     })).resolves.toBe(true);
     await expect(policy.approve({
       toolName: "run_command",

@@ -10,8 +10,8 @@ import { discoverSkills } from "../src/context/skill-registry.js";
 import {
   assertSafeRelativePath,
   resolveExistingWorkspacePath,
-  createWorkspacePathResolver,
 } from "../src/policy/path-policy.js";
+import { resolvePatchPath } from "../src/tools/patch-paths.js";
 import { createTempDirectoryFixture } from "./test-utils.js";
 
 const createTempDirectory = createTempDirectoryFixture();
@@ -95,10 +95,9 @@ describe("workspace path policy", () => {
       .rejects.toThrow("sensitive");
     await expect(resolveExistingWorkspacePath(root, "settings-link/generated"))
       .rejects.toThrow("sensitive");
-    const resolver = await createWorkspacePathResolver(root);
-    await expect(resolver.resolveForMutation("config-alias/new.json"))
+    await expect(resolvePatchPath(root, "config-alias/new.json"))
       .rejects.toThrow("blocked");
-    await expect(resolver.resolveForMutation("settings-link/new.json"))
+    await expect(resolvePatchPath(root, "settings-link/new.json"))
       .rejects.toThrow("sensitive");
   });
 });

@@ -66,7 +66,6 @@ async function main(): Promise<void> {
 
   const traceDirectory = path.join(workspaceRoot, ".agent-runs");
   const historyStore = new JsonlConversationStore(traceDirectory, {
-    legacyDirectory: path.join(workspaceRoot, ".agent-history"),
     onWarning(message) {
       process.stderr.write(`agent: ${message}\n`);
     },
@@ -82,7 +81,6 @@ async function main(): Promise<void> {
   });
   readline.on("SIGINT", () => readline.close());
   const interactiveApprovalPolicy = new CallbackApprovalPolicy(async (request: ApprovalRequest) => {
-    if (options.autoApprove) return true;
     const preview = JSON.stringify(request.arguments, null, 2).slice(0, 2_000);
     const answer = await readline.question(
       `\nApprove ${request.risk} tool '${request.toolName}'?\n${preview}\n[y/N] `,
@@ -91,7 +89,7 @@ async function main(): Promise<void> {
     return decision === "y" || decision === "yes";
   });
   const approvalPolicy = new AutoApproveWorkspaceFileOperationsPolicy(
-    interactiveApprovalPolicy,
+    interactiveApprovalPolicy, workspaceRoot, options.autoApprove,
   );
 
   const skillCatalog = createSkillCatalog(skills);

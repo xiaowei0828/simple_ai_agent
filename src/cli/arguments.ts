@@ -22,7 +22,7 @@ Options:
       --stream              Stream model output (default)
       --no-stream           Wait for complete model responses
       --debug               Add raw requests, responses, and SSE events to the session log
-  -y, --yes                 Approve run_command calls without prompting
+  -y, --yes                 Approve commands and external file changes without prompting
   -h, --help                Show this help
 
 Environment:

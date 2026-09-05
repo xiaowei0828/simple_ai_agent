@@ -96,7 +96,7 @@ export function projectSessionTrace(entries: ParsedTraceEntry[]): ParsedTraceEnt
       step.response = { ...entry, value: {
         type: "openai.response", traceId, timestamp: value.timestamp,
         durationMs: Math.max(0, Date.parse(String(value.timestamp)) - Date.parse(String(step.request.value.timestamp))),
-        body: { id: response.id, model, status: "completed", output: responseInputItems(response), output_text: response.outputText, usage: response.usage },
+        body: { id: response.id, model, status: response.status ?? "completed", output: responseInputItems(response), output_text: response.outputText, usage: response.usage },
       } };
       step.error = undefined;
     } else if (type === "session.tool_output") {

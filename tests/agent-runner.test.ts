@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { AgentLimitError, AgentResponseError, AgentRunner } from "../src/core/agent-runner.js";
+import { AgentLimitError, AgentResponseError } from "../src/core/agent-runner.js";
 import { contextTokens, responseInputItems } from "../src/core/context-compaction.js";
 import type {
   AgentEvent,
@@ -11,10 +11,10 @@ import type {
   ModelResponse,
   ToolCallOutput,
 } from "../src/core/types.js";
-import { AllowAllApprovalPolicy, CallbackApprovalPolicy, DenyAllApprovalPolicy } from "../src/policy/approval-policy.js";
+import { AllowAllApprovalPolicy, CallbackApprovalPolicy } from "../src/policy/approval-policy.js";
 import { createDefaultToolRegistry } from "../src/tools/index.js";
 import { ToolRegistry } from "../src/tools/types.js";
-import { createTempDirectoryFixture } from "./test-utils.js";
+import { createTempDirectoryFixture, createTestRunner } from "./test-utils.js";
 
 const createTempDirectory = createTempDirectoryFixture();
 
@@ -51,6 +51,68 @@ function functionCallOutputs(request: ModelRequest | undefined): ToolCallOutput[
 
 describe("AgentRunner", () => {
   it.each([
+    { status: "incomplete", withTools: false }, { status: "incomplete", withTools: true },
+    { status: "failed", withTools: false }, { status: "failed", withTools: true },
+  ])("preserves $status responses (tools=$withTools) without completing or executing tools", async ({ status, withTools }) => {
+    const events: AgentEvent[] = [];
+    let executions = 0;
+    const model = new ScriptedModel([{
+      id: "partial", status, incompleteDetails: { reason: "max_output_tokens" }, outputText: "partial answer",
+      toolCalls: withTools ? [{ callId: "a", name: "write", arguments: "{}" }] : [],
+    }]);
+    const runner = createTestRunner({
+      model,
+      tools: new ToolRegistry([{
+        risk: "write", definition: { type: "function", name: "write", description: "test", parameters: {}, strict: false },
+        parse: (input) => input, async execute() { executions++; },
+      }]),
+      approvalPolicy: new AllowAllApprovalPolicy(), onEvent(event) { events.push(event); },
+    });
+    await expect(runner.run("test")).rejects.toThrow(`status=${status}, reason=max_output_tokens`);
+    expect(executions).toBe(0);
+    expect(events.some((event) => event.type === "model_response" && event.response.outputText === "partial answer")).toBe(true);
+    expect(events.some((event) => event.type === "run_completed")).toBe(false);
+  });
+
+  it.each(["tool_completed", "tool_output", "serialization"])("stops on %s failure without reporting a completed action as failed", async (failure) => {
+    const events: AgentEvent[] = [];
+    let executions = 0;
+    const model = new ScriptedModel([{
+      id: "calls", outputText: "", toolCalls: [
+        { callId: "a", name: "write", arguments: "{}" },
+        { callId: "b", name: "write", arguments: "{}" },
+      ],
+    }]);
+    const runner = createTestRunner({
+      model,
+      tools: new ToolRegistry([{
+        risk: "write", definition: { type: "function", name: "write", description: "test", parameters: {}, strict: false },
+        parse: (input) => input,
+        async execute() {
+          executions++;
+          return failure === "serialization" ? { toJSON() { throw new Error("serialization failed"); } } : "saved";
+        },
+      }]),
+      approvalPolicy: new AllowAllApprovalPolicy(),
+      onEvent(event) {
+        if (event.type === failure) throw new Error(`${failure} failed`);
+        events.push(event);
+      },
+    });
+    await expect(runner.run("test")).rejects.toThrow(`${failure} failed`);
+    expect(executions).toBe(1);
+    expect(model.requests).toHaveLength(1);
+    expect(events.some((event) => event.type === "tool_failed")).toBe(false);
+    const outputs = events.filter((event) => event.type === "tool_output");
+    if (failure === "tool_completed") {
+      expect(outputs).toHaveLength(1);
+      expect(JSON.parse(outputs[0]!.output.output)).toEqual({ ok: true, result: "saved" });
+    } else {
+      expect(outputs).toHaveLength(0);
+    }
+  });
+
+  it.each([
     { usage: { total_tokens: 7_000 }, contextWindow: 10_000, measured: 7_000 },
     { usage: { input_tokens: 6_000, output_tokens: 1_000 }, contextWindow: 10_000, measured: 7_000 },
     { usage: undefined, contextWindow: 10_000, measured: 0 },
@@ -66,9 +128,8 @@ describe("AgentRunner", () => {
     const summary = "Previous checkpoint.";
     const instructions = "test instructions";
     const tools = createDefaultToolRegistry();
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model, modelName: "default-model", instructions, tools,
-      toolContext: { workspaceRoot: process.cwd() }, approvalPolicy: new DenyAllApprovalPolicy(),
       contextWindow: (name) => name === "selected-model" ? contextWindow : 20_000,
       onEvent(event) { events.push(event); },
     });
@@ -92,17 +153,12 @@ describe("AgentRunner", () => {
   });
 
   it("allows one run to override the configured model", async () => {
-    const root = await fixture();
     const model = new ScriptedModel([
       { id: "response-override", outputText: "Done.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
       modelName: "default-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new DenyAllApprovalPolicy(),
     });
 
     await runner.run("use another model", { model: "selected-model" });
@@ -111,17 +167,11 @@ describe("AgentRunner", () => {
   });
 
   it("requests automatic reasoning summaries on every model turn", async () => {
-    const root = await fixture();
     const model = new ScriptedModel([
       { id: "response-1", outputText: "Done.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new DenyAllApprovalPolicy(),
     });
 
     await runner.run("explain the project");
@@ -130,7 +180,6 @@ describe("AgentRunner", () => {
   });
 
   it("streams by default and forwards model deltas", async () => {
-    const root = await fixture();
     const events: AgentEvent[] = [];
     const model: ModelAdapter = {
       async respond(request) {
@@ -148,13 +197,8 @@ describe("AgentRunner", () => {
         };
       },
     };
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new DenyAllApprovalPolicy(),
       onEvent(event) {
         events.push(event);
       },
@@ -172,15 +216,11 @@ describe("AgentRunner", () => {
   });
 
   it("allows the host to explicitly disable streaming", async () => {
-    const root = await fixture();
     const model = new ScriptedModel([
       { id: "response-1", outputText: "Done.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
-      model, modelName: "test-model", instructions: "test",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new DenyAllApprovalPolicy(),
+    const runner = createTestRunner({
+      model, instructions: "test",
       stream: false,
     });
     await runner.run("Explain the project.");
@@ -189,16 +229,11 @@ describe("AgentRunner", () => {
   });
 
   it("continues a conversation from a response ID supplied by the host", async () => {
-    const root = await fixture();
     const model = new ScriptedModel([
       { id: "response-next", outputText: "Continued answer.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
     });
 
@@ -209,16 +244,11 @@ describe("AgentRunner", () => {
   });
 
   it("replays local user and assistant messages when no response ID is available", async () => {
-    const root = await fixture();
     const model = new ScriptedModel([
       { id: "response-next", outputText: "Continued answer.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
     });
 
@@ -238,14 +268,9 @@ describe("AgentRunner", () => {
   });
 
   it("keeps local history without duplicating it in response-ID requests", async () => {
-    const root = await fixture();
     const model = new ScriptedModel([{ id: "next", outputText: "done", toolCalls: [] }]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
     });
 
@@ -257,15 +282,10 @@ describe("AgentRunner", () => {
   });
 
   it("returns a retry checkpoint when the first model request fails after a known response", async () => {
-    const root = await fixture();
     const requests: ModelRequest[] = [];
     const failure = new TypeError("connection terminated");
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model: { async respond(request) { requests.push(request); throw failure; } },
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
     });
 
@@ -286,12 +306,11 @@ describe("AgentRunner", () => {
   });
 
   it("checkpoints saved tool outputs and resumes without executing the tool again", async () => {
-    const root = await fixture();
     const requests: ModelRequest[] = [];
     const savedOutputs: ToolCallOutput[] = [];
     let modelCall = 0;
     let executions = 0;
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model: {
         async respond(request) {
           requests.push(request);
@@ -307,8 +326,6 @@ describe("AgentRunner", () => {
           return { id: "response-done", outputText: "Done.", toolCalls: [] };
         },
       },
-      modelName: "test-model",
-      instructions: "test instructions",
       tools: new ToolRegistry([{
         definition: {
           type: "function", name: "save_result", description: "fixture",
@@ -318,7 +335,6 @@ describe("AgentRunner", () => {
         parse(input: unknown) { return input; },
         async execute() { executions += 1; return { saved: true }; },
       }]),
-      toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
       onEvent(event) {
         if (event.type === "tool_output") savedOutputs.push(event.output);
@@ -351,15 +367,10 @@ describe("AgentRunner", () => {
   });
 
   it("does not issue another checkpoint when a continuation's first request fails", async () => {
-    const root = await fixture();
     const requests: ModelRequest[] = [];
     const failure = new TypeError("still offline");
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model: { async respond(request) { requests.push(request); throw failure; } },
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
     });
 
@@ -393,10 +404,8 @@ describe("AgentRunner", () => {
       },
       { id: "response-2", outputText: "The answer is 42.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
@@ -424,9 +433,8 @@ describe("AgentRunner", () => {
       ] },
       { id: "done", outputText: "Done.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model, modelName: "test", instructions: "test",
-      toolContext: { workspaceRoot: process.cwd() },
       tools: new ToolRegistry((["write", "execute"] as const).map((risk) => ({
         risk,
         definition: { type: "function", name: risk, description: "fixture", parameters: {}, strict: false },
@@ -449,89 +457,6 @@ describe("AgentRunner", () => {
       "approve:execute", "execute:execute", "saved:b",
     ]);
     expect(functionCallOutputs(model.requests[1]).map((output) => output.call_id)).toEqual(["a", "b"]);
-  });
-
-  it("keeps truncated success and error outputs within the limit as valid JSON", async () => {
-    const root = await fixture();
-    const tools = new ToolRegistry([{
-      definition: {
-        type: "function",
-        name: "large_output",
-        description: "Return or throw a large test payload.",
-        parameters: { type: "object" },
-        strict: true,
-      },
-      risk: "execute",
-      parse(input: unknown) {
-        return input as { fail: boolean };
-      },
-      async execute(input: { fail: boolean }) {
-        const content = `BEGIN-${"x".repeat(2_000)}-END`;
-        if (input.fail) throw new Error(content);
-        return { content };
-      },
-    }]);
-    const model = new ScriptedModel([
-      {
-        id: "response-1",
-        outputText: "",
-        toolCalls: [
-          {
-            callId: "call-success",
-            name: "large_output",
-            arguments: JSON.stringify({ fail: false }),
-          },
-          {
-            callId: "call-error",
-            name: "large_output",
-            arguments: JSON.stringify({ fail: true }),
-          },
-        ],
-      },
-      { id: "response-2", outputText: "Done.", toolCalls: [] },
-    ]);
-    const maxToolOutputChars = 400;
-    const runner = new AgentRunner({
-      model,
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools,
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new AllowAllApprovalPolicy(),
-      maxToolOutputChars,
-      maxToolOutputCharsPerStep: maxToolOutputChars * 2,
-    });
-
-    await runner.run("Produce large outputs.");
-
-    const [successOutput, errorOutput] = functionCallOutputs(model.requests[1]);
-    expect(successOutput?.output.length).toBeLessThanOrEqual(maxToolOutputChars);
-    expect(errorOutput?.output.length).toBeLessThanOrEqual(maxToolOutputChars);
-
-    const success = JSON.parse(successOutput?.output ?? "") as Record<string, unknown>;
-    expect(success).toMatchObject({
-      ok: true,
-      truncated: true,
-      originalOutputChars: expect.any(Number),
-      truncation: {
-        strategy: "structured",
-        truncatedStrings: 1,
-        omittedStringChars: expect.any(Number),
-      },
-    });
-    const successResult = success.result as { content: string };
-    expect(successResult.content).toEqual(expect.stringMatching(/^BEGIN-/));
-    expect(successResult.content).toEqual(expect.stringMatching(/-END$/));
-
-    const failure = JSON.parse(errorOutput?.output ?? "") as Record<string, unknown>;
-    expect(failure).toMatchObject({
-      ok: false,
-      truncated: true,
-      originalOutputChars: expect.any(Number),
-      omittedErrorChars: expect.any(Number),
-    });
-    expect(failure.error).toEqual(expect.stringMatching(/^BEGIN-/));
-    expect(failure.error).toEqual(expect.stringMatching(/-END$/));
   });
 
   it("shares one output budget across every tool call in a model step", async () => {
@@ -563,9 +488,8 @@ describe("AgentRunner", () => {
       { id: "response-2", outputText: "Done.", toolCalls: [] },
     ]);
     const maxToolOutputCharsPerStep = 600;
-    const runner = new AgentRunner({
-      model, modelName: "test-model", instructions: "test instructions", tools,
-      toolContext: { workspaceRoot: process.cwd() },
+    const runner = createTestRunner({
+      model, tools,
       approvalPolicy: new AllowAllApprovalPolicy(),
       maxToolOutputChars: 400,
       maxToolOutputCharsPerStep,
@@ -615,9 +539,8 @@ describe("AgentRunner", () => {
       { id: "response-1", outputText: "", toolCalls: calls },
       { id: "response-2", outputText: "Done.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
-      model, modelName: "test-model", instructions: "test instructions", tools,
-      toolContext: { workspaceRoot: process.cwd() },
+    const runner = createTestRunner({
+      model, tools,
       approvalPolicy: new AllowAllApprovalPolicy(),
       maxToolOutputCharsPerStep: 128,
     });
@@ -636,7 +559,7 @@ describe("AgentRunner", () => {
   });
 
   it("bounds command output once while preserving process status", async () => {
-    const root = await fixture();
+    const root = await createTempDirectory("agent-command-output-");
     await writeFile(
       path.join(root, "many-lines.txt"),
       Array.from({ length: 600 }, (_, index) => `line ${index + 1}`).join("\n"),
@@ -654,10 +577,8 @@ describe("AgentRunner", () => {
       },
       { id: "response-2", outputText: "Done.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test instructions",
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new AllowAllApprovalPolicy(),
@@ -681,27 +602,9 @@ describe("AgentRunner", () => {
     expect(parsed.result.truncated).toBe(false);
   });
 
-  it("rejects a tool output budget too small for a structured truncation envelope", async () => {
-    const root = await fixture();
-
-    expect(() => new AgentRunner({
-      model: new ScriptedModel([]),
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new AllowAllApprovalPolicy(),
-      maxToolOutputChars: 127,
-    })).toThrow("at least 128");
-    expect(() => new AgentRunner({
-      model: new ScriptedModel([]),
-      modelName: "test-model",
-      instructions: "test instructions",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
-      approvalPolicy: new AllowAllApprovalPolicy(),
-      maxToolOutputCharsPerStep: 127,
-    })).toThrow("maxToolOutputCharsPerStep must be an integer of at least 128");
+  it.each(["maxToolOutputChars", "maxToolOutputCharsPerStep"] as const)("rejects an undersized %s budget", (setting) => {
+    expect(() => createTestRunner({ model: new ScriptedModel([]), [setting]: 127 }))
+      .toThrow(`${setting} must be an integer of at least 128`);
   });
 
   it("applies a patch only after approval and returns the change summary to the model", async () => {
@@ -712,8 +615,8 @@ describe("AgentRunner", () => {
       { id: "response-1", outputText: "", toolCalls: [{ callId: "patch-1", name: "apply_patch", arguments: JSON.stringify({ patch }) }] },
       { id: "response-2", outputText: "Edited.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
-      model, modelName: "test-model", instructions: "test",
+    const runner = createTestRunner({
+      model, instructions: "test",
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
       approvalPolicy: new CallbackApprovalPolicy(async (request) => {
@@ -747,13 +650,11 @@ describe("AgentRunner", () => {
       },
       { id: "response-2", outputText: "The edit was denied.", toolCalls: [] },
     ]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
       instructions: "test",
       tools: createDefaultToolRegistry(),
       toolContext: { workspaceRoot: root },
-      approvalPolicy: new DenyAllApprovalPolicy(),
     });
 
     await runner.run("Change the answer.");
@@ -763,27 +664,29 @@ describe("AgentRunner", () => {
   });
 
   it("stops a tool loop at the configured turn limit", async () => {
-    const root = await fixture();
+    let executions = 0;
     const toolResponse = (id: string): ModelResponse => ({
       id,
       outputText: "",
       toolCalls: [{
         callId: `call-${id}`,
-        name: "run_command",
-        arguments: JSON.stringify({ command: "node --version" }),
+        name: "loop",
+        arguments: "{}",
       }],
     });
     const model = new ScriptedModel([toolResponse("1"), toolResponse("2")]);
-    const runner = new AgentRunner({
+    const runner = createTestRunner({
       model,
-      modelName: "test-model",
-      instructions: "test",
-      tools: createDefaultToolRegistry(),
-      toolContext: { workspaceRoot: root },
+      tools: new ToolRegistry([{
+        risk: "execute", definition: { type: "function", name: "loop", description: "fixture", parameters: {}, strict: false },
+        parse: (input) => input, async execute() { executions++; return "continue"; },
+      }]),
       approvalPolicy: new AllowAllApprovalPolicy(),
       maxSteps: 2,
     });
 
     await expect(runner.run("Loop forever.")).rejects.toBeInstanceOf(AgentLimitError);
+    expect(executions).toBe(2);
+    expect(model.requests).toHaveLength(2);
   });
 });
